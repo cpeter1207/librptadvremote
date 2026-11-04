@@ -112,6 +112,80 @@ typedef struct RptAdvRemoteSetup {
     RptAdvRemoteScans scan_lists; /**< Immutable configured lists. */
     uint32_t startup_memory; /**< Existing safe memory selected at startup. */
 } RptAdvRemoteSetup;
+/** Request kinds; definitions themselves cannot be edited. */
+enum RptAdvRemoteRequestKind {
+    RPTADV_REMOTE_SET = 1, /**< Apply selected live state fields. */
+    RPTADV_REMOTE_RECALL = 2, /**< Recall selector. */
+    RPTADV_REMOTE_INHIBIT = 3 /**< Selector zero clears, one sets admin inhibit. */
+};
+/** Ordered patch bits: RX, TX, mode, width, RX/TX VFO, offset, RIT, XIT,
+ * power, encode, decode, channel. Unknown bits are rejected. */
+#define RPTADV_REMOTE_PATCH_ALL UINT64_C(8191)
+/** A live operation, copied before request returns. */
+typedef struct RptAdvRemoteRequest {
+    uint32_t struct_size; /**< Exact record size. */
+    uint32_t abi_version; /**< One. */
+    uint32_t kind; /**< RptAdvRemoteRequestKind. */
+    uint32_t selector; /**< Memory selector or inhibit value. */
+    uint64_t fields; /**< Selected patch bits, only used by SET. */
+    RptAdvRemoteState state; /**< Only fields selected by the mask are interpreted. */
+} RptAdvRemoteRequest;
+/** Activity flags copied from the current radio generation. */
+#define RPTADV_REMOTE_LOCAL_RX 1u
+/** Linked source is active. */
+#define RPTADV_REMOTE_LINK_RX 2u
+/** Command source has not unkeyed. */
+#define RPTADV_REMOTE_COMMAND_ACTIVE 4u
+/** Physical PTT is observed active. */
+#define RPTADV_REMOTE_PHYSICAL_PTT 8u
+/** Ordinary controller transmit intent. */
+#define RPTADV_REMOTE_REQUEST_PTT 16u
+/** One current-generation radio activity observation. */
+typedef struct RptAdvRemoteActivity {
+    uint32_t struct_size; /**< Exact record size. */
+    uint32_t flags; /**< Known activity flags only. */
+} RptAdvRemoteActivity;
+/** Synchronous dependency calls made only by the non-audio physical owner. */
+typedef struct RptAdvRemoteBackend {
+    uint32_t struct_size; /**< Exact table size. */
+    uint32_t abi_version; /**< One. */
+    void *context; /**< Borrowed only during advance. */
+    int (*read_state)(void *, RptAdvRemoteState *); /**< Fill state completely on success. */
+    int (*apply_state)(void *, const RptAdvRemoteState *); /**< May partially apply on error. */
+    int (*set_ptt)(void *, uint32_t); /**< Apply zero/one through the chosen provider. */
+} RptAdvRemoteBackend;
+/** Snapshot contains an applied state. */
+#define RPTADV_REMOTE_APPLIED 1u
+/** Snapshot contains observed state. */
+#define RPTADV_REMOTE_OBSERVED 2u
+/** Supported readback verified the applied state. */
+#define RPTADV_REMOTE_VERIFIED 4u
+/** Receive routing is permitted. */
+#define RPTADV_REMOTE_RECEIVE_PERMITTED 8u
+/** New PTT is inhibited. */
+#define RPTADV_REMOTE_INHIBITED 16u
+/** A tune awaits safe application. */
+#define RPTADV_REMOTE_PENDING 32u
+/** A first-cause failure is present. */
+#define RPTADV_REMOTE_FAILED 64u
+/** Last PTT command was successfully serviced. */
+#define RPTADV_REMOTE_PTT_APPLIED 128u
+/** The last serviced PTT command requested keying; not physical RF confirmation. */
+#define RPTADV_REMOTE_PTT_HIGH 256u
+/** Copied operating status; no caller storage is retained. */
+typedef struct RptAdvRemoteSnapshot {
+    uint32_t struct_size; /**< Exact writable record size. */
+    uint32_t flags; /**< Snapshot presence and status flags. */
+    RptAdvRemoteState requested; /**< Desired state. */
+    RptAdvRemoteState applied; /**< Valid when APPLIED is present. */
+    RptAdvRemoteState observed; /**< Valid when OBSERVED is present. */
+    int32_t failure_code; /**< First dependency cause when FAILED is present. */
+} RptAdvRemoteSnapshot;
+/** One retained final result; request ID zero is not a user operation. */
+typedef struct RptAdvRemoteCompletion {
+    uint64_t request_id; /**< Original request identifier. */
+    int32_t result; /**< Zero on successful application, otherwise operation error. */
+} RptAdvRemoteCompletion;
 /** Initial descriptor prefix. One non-audio owner serializes calls per handle. */
 typedef struct RptAdvRemoteApi {
     uint32_t struct_size; /**< Complete table byte count. */
@@ -120,6 +194,11 @@ typedef struct RptAdvRemoteApi {
     int (*create)(const RptAdvRemoteSetup *, void **); /**< Copy/validate setup; zero on success. */
     void (*destroy)(void *); /**< Release one handle, or accept NULL. */
     int (*configured_memory)(const void *, uint32_t, RptAdvRemoteState *); /**< Copy a definition, not observed state. */
+    int (*request)(void *, const RptAdvRemoteRequest *, uint64_t, uint64_t *); /**< Admit without physical I/O. */
+    int (*advance)(void *, uint64_t, const RptAdvRemoteActivity *, const RptAdvRemoteBackend *); /**< Owner-only service. */
+    int (*snapshot)(const void *, RptAdvRemoteSnapshot *); /**< Copy explicit applied/observed status. */
+    int (*take_completion)(void *, RptAdvRemoteCompletion *); /**< Zero for a result, one if empty. */
+    int (*retire)(void *); /**< Invalidate work; service once more to unkey before destruction. */
 } RptAdvRemoteApi;
 /** Return the immutable descriptor. Input pointers must remain readable/aligned. */
 const RptAdvRemoteApi *rptadv_remote_api_v1(void);

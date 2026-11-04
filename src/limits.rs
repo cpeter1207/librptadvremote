@@ -20,6 +20,14 @@ pub enum Error {
     Signaling = -6,
     /// Referenced memory/list/setting does not exist.
     NotFound = -7,
+    /// Physical application or observation failed; the snapshot retains its cause.
+    Backend = -8,
+    /// The bounded pending operation/completion slot is occupied.
+    Busy = -9,
+    /// The context has retired and cannot admit another operation.
+    Stale = -10,
+    /// Supported state readback disagrees with the requested tune.
+    ReadbackMismatch = -11,
 }
 
 impl std::fmt::Display for Error {

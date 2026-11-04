@@ -61,7 +61,7 @@ impl Signal {
 }
 
 #[repr(C)]
-struct State {
+pub(super) struct State {
     receive_hz: u64,
     transmit_hz: u64,
     offset_hz: i64,
@@ -79,7 +79,7 @@ struct State {
 }
 
 impl State {
-    fn resolve(&self) -> Result<OperatingState, Error> {
+    pub(super) fn resolve(&self) -> Result<OperatingState, Error> {
         if self.flags & !(TX | POWER | CHANNEL) != 0
             || self.flags & CHANNEL != 0 && self.channel > u32::from(u8::MAX)
         {
@@ -100,6 +100,45 @@ impl State {
             encode: self.encode.resolve()?,
             decode: self.decode.resolve()?,
         })
+    }
+
+    pub(super) fn patch(&self, fields: u64) -> Result<OperatingPatch, Error> {
+        if fields == 0 || fields & !8191 != 0 || self.flags & !(TX | POWER | CHANNEL) != 0 {
+            return Err(Error::InvalidConfiguration);
+        }
+        let mut patch = OperatingPatch::default();
+        macro_rules! selected {
+            ($bit:literal, $field:ident) => {
+                if fields & (1 << $bit) != 0 {
+                    patch.$field = Some(self.$field);
+                }
+            };
+        }
+        selected!(0, receive_hz);
+        if fields & 2 != 0 {
+            patch.transmit_hz = Some((self.flags & TX != 0).then_some(self.transmit_hz));
+        }
+        if fields & 4 != 0 {
+            patch.mode = Some(mode(self.mode)?);
+        }
+        selected!(3, bandwidth_hz);
+        selected!(4, receive_vfo);
+        selected!(5, transmit_vfo);
+        selected!(6, offset_hz);
+        selected!(7, rit_hz);
+        selected!(8, xit_hz);
+        selected!(9, power_mw);
+        if fields & (1 << 10) != 0 {
+            patch.encode = Some(self.encode.resolve()?);
+        }
+        if fields & (1 << 11) != 0 {
+            patch.decode = Some(self.decode.resolve()?);
+        }
+        if fields & (1 << 12) != 0 {
+            patch.channel =
+                Some(u8::try_from(self.channel).map_err(|_| Error::InvalidConfiguration)?);
+        }
+        Ok(patch)
     }
 }
 
@@ -379,6 +418,16 @@ pub struct Api {
     create: extern "C" fn(*const Setup, *mut *mut c_void) -> i32,
     destroy: extern "C" fn(*mut c_void),
     configured_memory: extern "C" fn(*const c_void, u32, *mut State) -> i32,
+    request: extern "C" fn(*mut c_void, *const crate::ffi_session::Request, u64, *mut u64) -> i32,
+    advance: extern "C" fn(
+        *mut c_void,
+        u64,
+        *const crate::ffi_session::RawActivity,
+        *const crate::ffi_session::Backend,
+    ) -> i32,
+    snapshot: extern "C" fn(*const c_void, *mut crate::ffi_session::Snapshot) -> i32,
+    take_completion: extern "C" fn(*mut c_void, *mut crate::ffi_session::RawCompletion) -> i32,
+    retire: extern "C" fn(*mut c_void) -> i32,
 }
 
 // SAFETY: all descriptor fields and the pointed-to identity are immutable static data.
@@ -391,6 +440,11 @@ static API: Api = Api {
     create,
     destroy,
     configured_memory,
+    request: crate::ffi_session::request,
+    advance: crate::ffi_session::advance,
+    snapshot: crate::ffi_session::snapshot,
+    take_completion: crate::ffi_session::take_completion,
+    retire: crate::ffi_session::retire,
 };
 
 /// Return the initial shared remote-base descriptor; its handle methods are control-only.

@@ -85,3 +85,288 @@ fn remote_base_rejects_unsafe_complete_state() {
     unsupported_source.memories[0].state.encode.enabled = true;
     assert!(RemoteBase::new(unsupported_source, capabilities).is_err());
 }
+
+#[derive(Default)]
+struct Backend {
+    state: Option<OperatingState>,
+    writes: Vec<OperatingState>,
+    failures: std::collections::VecDeque<i32>,
+    keys: Vec<bool>,
+    key_failures: std::collections::VecDeque<i32>,
+    read_override: Option<OperatingState>,
+    events: Vec<&'static str>,
+}
+
+impl RigBackend for Backend {
+    fn capabilities(&self) -> Capabilities {
+        capabilities()
+    }
+    fn read_state(&mut self) -> Result<OperatingState, i32> {
+        self.events.push("read");
+        self.read_override
+            .clone()
+            .or_else(|| self.state.clone())
+            .ok_or(-100)
+    }
+    fn apply_step(&mut self, state: &OperatingState) -> Result<(), i32> {
+        self.writes.push(state.clone());
+        self.state = Some(state.clone());
+        match self.failures.pop_front() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+    fn set_ptt(&mut self, keyed: bool) -> Result<(), i32> {
+        self.events.push(if keyed { "key" } else { "unkey" });
+        self.keys.push(keyed);
+        self.key_failures.pop_front().map_or(Ok(()), Err)
+    }
+}
+
+fn running_radio() -> (RemoteBase, Backend) {
+    let mut radio = RemoteBase::new(configuration(), capabilities()).unwrap();
+    let mut backend = Backend::default();
+    radio.advance(0, Activity::default(), &mut backend).unwrap();
+    assert!(radio.take_completion().is_none());
+    assert!(!radio.snapshot().transmit_inhibited);
+    (radio, backend)
+}
+
+#[test]
+fn remote_tune_waits_for_ptt_but_can_preempt_open_receive() {
+    let (mut radio, mut backend) = running_radio();
+    let id = radio
+        .request(
+            RigRequest::Set(OperatingPatch {
+                receive_hz: Some(146_560_000),
+                transmit_hz: Some(Some(146_560_000)),
+                ..OperatingPatch::default()
+            }),
+            1,
+        )
+        .unwrap();
+    let writes = backend.writes.len();
+    radio
+        .advance(
+            1,
+            Activity {
+                physical_ptt: true,
+                transmit_requested: true,
+                ..Activity::default()
+            },
+            &mut backend,
+        )
+        .unwrap();
+    assert_eq!(backend.writes.len(), writes);
+    radio
+        .advance(
+            2,
+            Activity {
+                local_receiving: true,
+                command_source_active: true,
+                ..Activity::default()
+            },
+            &mut backend,
+        )
+        .unwrap();
+    assert_eq!(backend.writes.len(), writes);
+    radio
+        .advance(
+            3,
+            Activity {
+                local_receiving: true,
+                ..Activity::default()
+            },
+            &mut backend,
+        )
+        .unwrap();
+    assert_eq!(backend.writes.last().unwrap().receive_hz, 146_560_000);
+    let completion = radio.take_completion().unwrap();
+    assert_eq!(completion.id, id);
+    assert_eq!(completion.result, Ok(()));
+    assert!(!radio.snapshot().verified);
+}
+
+#[test]
+fn remote_partial_apply_retains_inhibit_and_first_cause() {
+    let (mut radio, mut backend) = running_radio();
+    radio
+        .request(
+            RigRequest::Set(OperatingPatch {
+                receive_hz: Some(146_560_000),
+                ..OperatingPatch::default()
+            }),
+            1,
+        )
+        .unwrap();
+    backend.failures.extend([-41, -42]);
+    assert_eq!(
+        radio.advance(1, Activity::default(), &mut backend),
+        Err(Error::Backend)
+    );
+    assert!(radio.snapshot().transmit_inhibited);
+    assert_eq!(radio.snapshot().failure.unwrap().code, -41);
+    assert_eq!(radio.take_completion().unwrap().result, Err(Error::Backend));
+    assert_eq!(backend.writes.last().unwrap().receive_hz, 146_520_000);
+}
+
+#[test]
+fn remote_retired_generation_cannot_apply() {
+    let (mut radio, mut backend) = running_radio();
+    radio.request(RigRequest::Recall(1), 1).unwrap();
+    let writes = backend.writes.len();
+    radio.retire();
+    assert_eq!(
+        radio.advance(2, Activity::default(), &mut backend),
+        Err(Error::Stale)
+    );
+    assert_eq!(backend.writes.len(), writes);
+    assert!(radio.snapshot().transmit_inhibited);
+    assert_eq!(backend.keys.last(), Some(&false));
+    assert_eq!(radio.request(RigRequest::Recall(1), 3), Err(Error::Stale));
+}
+
+#[test]
+fn remote_observed_unsafe_front_panel_state_closes_receive_and_transmit() {
+    let mut caps = capabilities();
+    caps.readback = true;
+    let mut radio = RemoteBase::new(configuration(), caps).unwrap();
+    let mut backend = Backend::default();
+    radio.advance(0, Activity::default(), &mut backend).unwrap();
+    assert!(radio.snapshot().verified);
+    backend.state.as_mut().unwrap().receive_hz = 149_000_000;
+    assert_eq!(
+        radio.advance(1_000, Activity::default(), &mut backend),
+        Err(Error::ReceiveFrequency)
+    );
+    assert!(!radio.snapshot().receive_permitted);
+    assert!(radio.snapshot().transmit_inhibited);
+}
+
+#[test]
+fn remote_readback_mismatch_does_not_report_success() {
+    let mut caps = capabilities();
+    caps.readback = true;
+    let config = configuration();
+    let mut different = config.memories[0].state.clone();
+    different.receive_hz = 146_560_000;
+    let mut backend = Backend {
+        read_override: Some(different),
+        ..Backend::default()
+    };
+    let mut radio = RemoteBase::new(config, caps).unwrap();
+    assert_eq!(
+        radio.advance(0, Activity::default(), &mut backend),
+        Err(Error::ReadbackMismatch)
+    );
+    assert!(radio.snapshot().transmit_inhibited);
+    assert!(!radio.snapshot().verified);
+}
+
+#[test]
+fn remote_key_failure_attempts_unkey_and_keeps_first_cause() {
+    let (mut radio, mut backend) = running_radio();
+    backend.key_failures.extend([-41, -42]);
+    assert_eq!(
+        radio.advance(
+            1,
+            Activity {
+                transmit_requested: true,
+                ..Activity::default()
+            },
+            &mut backend
+        ),
+        Err(Error::Backend)
+    );
+    assert_eq!(&backend.keys[backend.keys.len() - 2..], &[true, false]);
+    assert_eq!(radio.snapshot().failure.unwrap().code, -41);
+    assert!(radio.snapshot().transmit_inhibited);
+    assert_eq!(radio.snapshot().ptt_applied, None);
+}
+
+#[test]
+fn remote_bounded_completion_is_retained_until_drained() {
+    let (mut radio, mut backend) = running_radio();
+    let id = radio.request(RigRequest::Recall(1), 1).unwrap();
+    assert_eq!(radio.request(RigRequest::Recall(1), 1), Err(Error::Busy));
+    radio.advance(1, Activity::default(), &mut backend).unwrap();
+    assert_eq!(radio.request(RigRequest::Recall(1), 2), Err(Error::Busy));
+    assert_eq!(radio.take_completion().unwrap().id, id);
+    assert!(radio.request(RigRequest::Recall(1), 2).is_ok());
+}
+
+#[test]
+fn remote_unkey_precedes_periodic_readback() {
+    let mut caps = capabilities();
+    caps.readback = true;
+    let mut radio = RemoteBase::new(configuration(), caps).unwrap();
+    let mut backend = Backend::default();
+    radio.advance(0, Activity::default(), &mut backend).unwrap();
+    radio
+        .advance(
+            1,
+            Activity {
+                transmit_requested: true,
+                ..Activity::default()
+            },
+            &mut backend,
+        )
+        .unwrap();
+    backend.events.clear();
+    radio
+        .advance(1_000, Activity::default(), &mut backend)
+        .unwrap();
+    assert_eq!(backend.events.first(), Some(&"unkey"));
+    assert!(backend.events.contains(&"read"));
+}
+
+#[test]
+fn remote_front_panel_tuning_is_preserved_when_changing_another_setting() {
+    let mut caps = capabilities();
+    caps.readback = true;
+    let mut radio = RemoteBase::new(configuration(), caps).unwrap();
+    let mut backend = Backend::default();
+    radio.advance(0, Activity::default(), &mut backend).unwrap();
+    backend.state.as_mut().unwrap().receive_hz = 146_560_000;
+    radio
+        .advance(1_000, Activity::default(), &mut backend)
+        .unwrap();
+    radio
+        .request(
+            RigRequest::Set(OperatingPatch {
+                power_mw: Some(6_000),
+                ..OperatingPatch::default()
+            }),
+            1_001,
+        )
+        .unwrap();
+    radio
+        .advance(1_001, Activity::default(), &mut backend)
+        .unwrap();
+    assert_eq!(backend.writes.last().unwrap().receive_hz, 146_560_000);
+    assert_eq!(backend.writes.last().unwrap().power_mw, Some(6_000));
+}
+
+#[test]
+fn remote_critical_inhibit_bypasses_a_pending_tune() {
+    let (mut radio, mut backend) = running_radio();
+    let tune = radio.request(RigRequest::Recall(1), 1).unwrap();
+    let inhibit = radio.request(RigRequest::Inhibit(true), 2).unwrap();
+    assert!(radio.snapshot().transmit_inhibited);
+    radio
+        .advance(
+            2,
+            Activity {
+                physical_ptt: true,
+                transmit_requested: true,
+                ..Activity::default()
+            },
+            &mut backend,
+        )
+        .unwrap();
+    assert_eq!(backend.keys.last(), Some(&false));
+    assert_eq!(radio.take_completion().unwrap().id, inhibit);
+    radio.advance(3, Activity::default(), &mut backend).unwrap();
+    assert_eq!(radio.take_completion().unwrap().id, tune);
+    assert!(radio.snapshot().transmit_inhibited);
+}
