@@ -1,0 +1,21 @@
+[package]
+name = "rptadv-remote"
+version = "0.1.0-alpha.1"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-2.0-only"
+description = "Shared remote-base operating state and radio policy"
+publish = false
+
+[lib]
+name = "rptadvremote"
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+codegen-units = 1
+debug = 1
+lto = "thin"
+panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }

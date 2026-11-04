@@ -1,0 +1,3 @@
+usr/include/rptadvremote/rptadvremote.h
+usr/lib/*/librptadvremote.so
+usr/lib/*/pkgconfig/rptadvremote.pc

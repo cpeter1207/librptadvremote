@@ -1,0 +1,18 @@
+name: Developer documentation
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  pages: write
+  id-token: write
+
+jobs:
+  documentation:
+    uses: cpeter1207/rptadv-shared-library-workflows/.github/workflows/documentation.yml@main
+    with:
+      code_ref: ${{ github.sha }}
