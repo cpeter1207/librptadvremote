@@ -6,6 +6,9 @@ mod limits_contract;
 #[path = "scan_tests.rs"]
 mod scan_contract;
 
+#[path = "session_tests.rs"]
+mod session_contract;
+
 fn configuration() -> RemoteBaseConfig {
     RemoteBaseConfig {
         limits: Limits {

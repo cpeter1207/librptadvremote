@@ -56,7 +56,7 @@ impl Rig {
         }
         unsafe extern "C" fn ptt(context: *mut c_void, keyed: u32) -> i32 {
             let rig = unsafe { &mut *context.cast::<Rig>() };
-            if rig.error == 4 {
+            if matches!(rig.error, 4 | 6) {
                 return -74;
             }
             rig.keyed = keyed != 0;
@@ -64,7 +64,7 @@ impl Rig {
         }
         unsafe extern "C" fn tune(context: *mut c_void, keyed: u32) -> i32 {
             let rig = unsafe { &mut *context.cast::<Rig>() };
-            if rig.error == 5 {
+            if matches!(rig.error, 5 | 6) {
                 return -75;
             }
             rig.tuned = keyed != 0;
@@ -294,4 +294,109 @@ fn c_session_retains_actual_backend_failures_and_supports_optional_non_scan_cloc
         );
         assert_eq!(id, 0);
     });
+}
+
+#[test]
+fn c_manual_tune_waits_for_existing_demand_without_losing_its_completion() {
+    for flags in [4, 8, 16, 64] {
+        with_owner(|handle| {
+            let mut rig = Rig::new();
+            assert_eq!(tick(handle, &mut rig, 0, 0), 0);
+            let mut id = 0;
+            assert_eq!(request(handle, &operation(13), 1, &mut id), 0);
+            assert_eq!(tick(handle, &mut rig, flags, 1), 0);
+            assert!(!rig.tuned, "started manual tone during demand {flags}");
+            if rig.keyed {
+                assert_eq!(tick(handle, &mut rig, 8, 2), 0);
+            }
+            assert_eq!(tick(handle, &mut rig, 0, 3), 0);
+            assert!(rig.tuned);
+            assert_eq!(tick(handle, &mut rig, 0, 4), 0);
+            assert_eq!(tick(handle, &mut rig, 32, 4), 0);
+            let mut completion = RawCompletion {
+                request_id: 0,
+                result: 0,
+            };
+            assert_eq!(take_completion(handle, &mut completion), 0);
+            assert_eq!(completion.request_id, id);
+            assert_eq!(completion.result, Error::Stale as i32);
+        });
+    }
+}
+
+#[test]
+fn c_manual_tune_unkeys_on_cancellation_retirement_and_physical_failure() {
+    for scenario in 0..6 {
+        with_owner(|handle| {
+            let mut rig = Rig::new();
+            assert_eq!(tick(handle, &mut rig, 0, 0), 0);
+            let mut id = 0;
+            assert_eq!(request(handle, &operation(13), 1, &mut id), 0);
+            assert_eq!(tick(handle, &mut rig, 0, 1), 0);
+            if !matches!(scenario, 1 | 5) {
+                assert_eq!(tick(handle, &mut rig, 64 | 16, 2), 0);
+                assert!(rig.keyed);
+            }
+            let flags = match scenario {
+                0 | 2 => {
+                    rig.error = 5;
+                    32 | if scenario == 2 { 64 } else { 0 }
+                }
+                1 => {
+                    rig.error = 4;
+                    64
+                }
+                5 => {
+                    rig.error = 6;
+                    64
+                }
+                3 => {
+                    assert_eq!(retire(handle), 0);
+                    64
+                }
+                _ => {
+                    let mut inhibit = operation(3);
+                    inhibit.selector = 1;
+                    let mut urgent_id = 0;
+                    assert_eq!(request(handle, &inhibit, 3, &mut urgent_id), 0);
+                    64
+                }
+            };
+            let result = tick(handle, &mut rig, flags, 3);
+            assert_eq!(
+                result,
+                match scenario {
+                    0..=2 | 5 => Error::Backend as i32,
+                    3 => Error::Stale as i32,
+                    _ => 0,
+                }
+            );
+            if !matches!(scenario, 0 | 2 | 5) {
+                assert!(!rig.tuned);
+            }
+            if !matches!(scenario, 1 | 5) {
+                assert!(!rig.keyed);
+            }
+            let mut completion = RawCompletion {
+                request_id: 0,
+                result: 0,
+            };
+            assert_eq!(take_completion(handle, &mut completion), 0);
+            assert_eq!(completion.request_id, id);
+            assert_eq!(
+                completion.result,
+                if matches!(scenario, 0..=2 | 5) {
+                    Error::Backend as i32
+                } else {
+                    Error::Stale as i32
+                }
+            );
+            if matches!(scenario, 0..=2 | 5) {
+                assert_eq!(
+                    current(handle).failure_code,
+                    if matches!(scenario, 1 | 5) { -74 } else { -75 }
+                );
+            }
+        });
+    }
 }

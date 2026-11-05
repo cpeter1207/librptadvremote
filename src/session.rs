@@ -18,13 +18,9 @@ pub trait RigBackend {
     fn set_tune(&mut self, enabled: bool) -> Result<(), i32>;
     /// Current owner clock, in the same monotonic milliseconds as `advance`.
     /// It is read again after a potentially blocking physical call.
-    fn monotonic_ms(&self) -> u64 {
-        0
-    }
+    fn monotonic_ms(&self) -> u64;
     /// Rising-edge count for transmit demand, published independently by audio.
-    fn transmit_epoch(&self) -> u64 {
-        0
-    }
+    fn transmit_epoch(&self) -> u64;
 }
 
 /// Native radio activity copied from the current generation's published state.
@@ -517,7 +513,7 @@ impl RemoteBase {
             && self
                 .pending
                 .as_ref()
-                .is_some_and(|pending| pending.id.0 != 0 && pending.scan_member.is_none())
+                .is_some_and(|pending| pending.id.0 != 0)
         {
             let pending = self.pending.take().expect("manual pending was checked");
             self.completion = Some(Completion {
@@ -582,12 +578,14 @@ impl RemoteBase {
                         .scan_rejected_bursts
                         .saturating_add(after.wrapping_sub(epoch));
                 }
-                if let Some(scan) = self.scan.as_mut() {
-                    if let Some(completion) =
-                        scan.complete(member, completed, result, self.last_attempt_code)
-                    {
-                        self.completion = Some(completion);
-                    }
+                let scan = self
+                    .scan
+                    .as_mut()
+                    .expect("a scan member retains its traversal");
+                if let Some(completion) =
+                    scan.complete(member, completed, result, self.last_attempt_code)
+                {
+                    self.completion = Some(completion);
                 }
             } else if pending.id.0 != 0 {
                 self.completion = Some(Completion {
