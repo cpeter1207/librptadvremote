@@ -1,0 +1,16 @@
+name: Prerequisite validation
+on:
+  workflow_dispatch:
+    inputs:
+      code_ref:
+        description: Exact implementation commit to validate
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  quality:
+    uses: cpeter1207/rptadv-shared-library-workflows/.github/workflows/quality.yml@main
+    with:
+      code_ref: ${{ inputs.code_ref }}
+      full: true
