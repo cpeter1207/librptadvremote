@@ -69,8 +69,12 @@ pub struct OperatingPatch {
     pub offset_hz: Option<i64>,
     /// New receive incremental tuning.
     pub rit_hz: Option<i64>,
+    /// Independently enable or disable receive incremental tuning.
+    pub rit_enabled: Option<bool>,
     /// New transmit incremental tuning.
     pub xit_hz: Option<i64>,
+    /// Independently enable or disable transmit incremental tuning.
+    pub xit_enabled: Option<bool>,
     /// New established transmit power.
     pub power_mw: Option<u32>,
     /// New independently selected encode state.
@@ -96,7 +100,9 @@ impl OperatingPatch {
             split,
             offset_hz,
             rit_hz,
+            rit_enabled,
             xit_hz,
+            xit_enabled,
             encode,
             decode
         );
@@ -602,8 +608,11 @@ impl RemoteBase {
             return result;
         }
         if self.capabilities.readback_fields != 0 && now_ms >= self.next_poll_ms {
-            self.next_poll_ms = now_ms.saturating_add(self.poll_interval_ms());
-            self.observe(backend, false)?;
+            let result = self.observe(backend, false);
+            self.next_poll_ms = now_ms
+                .max(backend.monotonic_ms())
+                .saturating_add(self.poll_interval_ms());
+            result?;
         }
         let keyed = activity.rendered_ptt
             && !self.snapshot.transmit_inhibited
@@ -804,7 +813,7 @@ impl RemoteBase {
         merge!(0 => receive_hz, 1 => transmit_hz, 2 => mode, 3 => bandwidth_hz,
             4 => receive_vfo, 5 => transmit_vfo, 6 => offset_hz, 7 => rit_hz,
             8 => xit_hz, 9 => power_mw, 10 => encode, 11 => decode, 12 => channel,
-            13 => split);
+            13 => split, 14 => rit_enabled, 15 => xit_enabled);
         // A physical TX VFO still exists for a receive-only memory. Readback
         // cannot grant permission to use it; keep the untouched raw observation.
         if self
@@ -844,9 +853,17 @@ impl RemoteBase {
             if expected.power_mw.is_none() {
                 expected.power_mw = observed.power_mw;
             }
+            // Inactive offsets can share a hardware register. Their stored
+            // values are observations, but do not change the admitted RF state.
+            if !expected.rit_enabled && !observed.rit_enabled {
+                expected.rit_hz = observed.rit_hz;
+            }
+            if !expected.xit_enabled && !observed.xit_enabled {
+                expected.xit_hz = observed.xit_hz;
+            }
             expected == observed
         });
-        self.snapshot.verified = matches && fields == 16383;
+        self.snapshot.verified = matches && fields == 65535;
         if !applying {
             // An allowed front-panel change becomes the base for later partial
             // commands; a power edit must not restore a stale VFO frequency.
@@ -854,7 +871,7 @@ impl RemoteBase {
             if self.pending.is_none() {
                 self.snapshot.requested = observed;
             }
-            self.snapshot.verified = fields == 16383;
+            self.snapshot.verified = fields == 65535;
             self.snapshot.receive_permitted = true;
             self.update_admission();
         }

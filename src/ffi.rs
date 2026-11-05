@@ -11,6 +11,8 @@ const TX: u32 = 1;
 const POWER: u32 = 2;
 const CHANNEL: u32 = 4;
 const SPLIT: u32 = 8;
+const RIT_ENABLED: u32 = 16;
+const XIT_ENABLED: u32 = 32;
 const INVALID: i32 = Error::InvalidConfiguration as i32;
 
 #[repr(C)]
@@ -86,7 +88,7 @@ pub(super) struct State {
 
 impl State {
     pub(super) fn resolve(&self) -> Result<OperatingState, Error> {
-        if self.flags & !(TX | POWER | CHANNEL | SPLIT) != 0
+        if self.flags & !(TX | POWER | CHANNEL | SPLIT | RIT_ENABLED | XIT_ENABLED) != 0
             || self.flags & CHANNEL != 0 && self.channel > u32::from(u8::MAX)
         {
             return Err(Error::InvalidConfiguration);
@@ -96,7 +98,9 @@ impl State {
             transmit_hz: (self.flags & TX != 0).then_some(self.transmit_hz),
             offset_hz: self.offset_hz,
             rit_hz: self.rit_hz,
+            rit_enabled: self.flags & RIT_ENABLED != 0,
             xit_hz: self.xit_hz,
+            xit_enabled: self.flags & XIT_ENABLED != 0,
             mode: mode(self.mode)?,
             bandwidth_hz: self.bandwidth_hz,
             receive_vfo: self.receive_vfo,
@@ -110,7 +114,9 @@ impl State {
     }
 
     pub(super) fn patch(&self, fields: u64) -> Result<OperatingPatch, Error> {
-        if fields == 0 || fields & !16383 != 0 || self.flags & !(TX | POWER | CHANNEL | SPLIT) != 0
+        if fields == 0
+            || fields & !65535 != 0
+            || self.flags & !(TX | POWER | CHANNEL | SPLIT | RIT_ENABLED | XIT_ENABLED) != 0
         {
             return Err(Error::InvalidConfiguration);
         }
@@ -149,6 +155,12 @@ impl State {
         if fields & (1 << 13) != 0 {
             patch.split = Some(self.flags & SPLIT != 0);
         }
+        if fields & (1 << 14) != 0 {
+            patch.rit_enabled = Some(self.flags & RIT_ENABLED != 0);
+        }
+        if fields & (1 << 15) != 0 {
+            patch.xit_enabled = Some(self.flags & XIT_ENABLED != 0);
+        }
         Ok(patch)
     }
 }
@@ -172,7 +184,9 @@ impl From<&OperatingState> for State {
             flags: (u32::from(state.transmit_hz.is_some()) * TX)
                 | (u32::from(state.power_mw.is_some()) * POWER)
                 | (u32::from(state.channel.is_some()) * CHANNEL)
-                | (u32::from(state.split) * SPLIT),
+                | (u32::from(state.split) * SPLIT)
+                | (u32::from(state.rit_enabled) * RIT_ENABLED)
+                | (u32::from(state.xit_enabled) * XIT_ENABLED),
             mode: state.mode as u32,
             bandwidth_hz: state.bandwidth_hz,
             receive_vfo: state.receive_vfo,

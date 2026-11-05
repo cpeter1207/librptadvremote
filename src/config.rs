@@ -86,8 +86,12 @@ pub struct OperatingState {
     pub offset_hz: i64,
     /// Receive incremental tuning.
     pub rit_hz: i64,
+    /// Apply the stored receive offset to the operating frequency.
+    pub rit_enabled: bool,
     /// Transmit incremental tuning.
     pub xit_hz: i64,
+    /// Apply the stored transmit offset to the operating frequency.
+    pub xit_enabled: bool,
     /// Established transmit power in milliwatts, when available.
     pub power_mw: Option<u32>,
     /// Independently selected transmit signaling.
@@ -209,7 +213,7 @@ pub struct RemoteBaseConfig {
 impl RemoteBaseConfig {
     /// Validate all references and states before a physical owner is created.
     pub fn validate(&self, capabilities: &Capabilities) -> Result<(), Error> {
-        if capabilities.readback_fields & !16383 != 0 {
+        if capabilities.readback_fields & !65535 != 0 {
             return Err(Error::InvalidConfiguration);
         }
         self.limits.validate()?;

@@ -98,31 +98,35 @@ impl Limits {
     pub fn validate_state(&self, state: &OperatingState, caps: &Capabilities) -> Result<(), Error> {
         let receive = state
             .receive_hz
-            .checked_add_signed(state.rit_hz)
+            .checked_add_signed(if state.rit_enabled { state.rit_hz } else { 0 })
             .ok_or(Error::ReceiveFrequency)?;
-        if !contains(&self.receive, receive)
-            || !caps
-                .receive
-                .iter()
-                .any(|range| range.covers(receive, state.mode))
-        {
+        if [state.receive_hz, receive].into_iter().any(|frequency| {
+            !contains(&self.receive, frequency)
+                || !caps
+                    .receive
+                    .iter()
+                    .any(|range| range.covers(frequency, state.mode))
+        }) {
             return Err(Error::ReceiveFrequency);
         }
         if !self.modes.contains(&state.mode) || !caps.modes.contains(&state.mode) {
             return Err(Error::Mode);
         }
         if let Some(base) = state.transmit_hz {
-            let transmit = base
+            let nominal = base
                 .checked_add_signed(state.offset_hz)
-                .and_then(|value| value.checked_add_signed(state.xit_hz))
                 .ok_or(Error::TransmitFrequency)?;
-            if !contains(&self.transmit, transmit)
-                || !caps
-                    .transmit
-                    .iter()
-                    .any(|range| range.covers(transmit, state.mode))
-                || contains(&self.receive_only, transmit)
-            {
+            let transmit = nominal
+                .checked_add_signed(if state.xit_enabled { state.xit_hz } else { 0 })
+                .ok_or(Error::TransmitFrequency)?;
+            if [nominal, transmit].into_iter().any(|frequency| {
+                !contains(&self.transmit, frequency)
+                    || !caps
+                        .transmit
+                        .iter()
+                        .any(|range| range.covers(frequency, state.mode))
+                    || contains(&self.receive_only, frequency)
+            }) {
                 return Err(Error::TransmitFrequency);
             }
             if self.maximum_power_mw.is_some_and(|maximum| {

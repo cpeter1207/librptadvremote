@@ -51,6 +51,91 @@ fn capabilities() -> Capabilities {
 }
 
 #[test]
+fn rf_limits_distinguish_stored_incremental_offsets_from_enabled_shifts() {
+    let config = configuration();
+    let mut state = config.memories[0].state.clone();
+    state.rit_hz = 8_000_000;
+    state.rit_enabled = false;
+    assert_eq!(
+        config.limits.validate_state(&state, &capabilities()),
+        Ok(())
+    );
+    state.rit_enabled = true;
+    assert_eq!(
+        config.limits.validate_state(&state, &capabilities()),
+        Err(Error::ReceiveFrequency)
+    );
+    state.rit_enabled = false;
+    state.xit_hz = 8_000_000;
+    state.xit_enabled = false;
+    assert_eq!(
+        config.limits.validate_state(&state, &capabilities()),
+        Ok(())
+    );
+    state.xit_enabled = true;
+    assert_eq!(
+        config.limits.validate_state(&state, &capabilities()),
+        Err(Error::TransmitFrequency)
+    );
+}
+
+#[test]
+fn rf_limits_require_both_nominal_and_shifted_frequencies_to_be_permitted() {
+    let config = configuration();
+    let mut state = config.memories[0].state.clone();
+    state.receive_hz = 143_900_000;
+    state.rit_hz = 200_000;
+    state.rit_enabled = true;
+    assert_eq!(
+        config.limits.validate_state(&state, &capabilities()),
+        Err(Error::ReceiveFrequency)
+    );
+    state.receive_hz = 146_520_000;
+    state.rit_enabled = false;
+    state.transmit_hz = Some(143_900_000);
+    state.xit_hz = 200_000;
+    state.xit_enabled = true;
+    assert_eq!(
+        config.limits.validate_state(&state, &capabilities()),
+        Err(Error::TransmitFrequency)
+    );
+}
+
+#[test]
+fn remote_periodic_readback_waits_a_full_interval_after_slow_io() {
+    let mut caps = capabilities();
+    caps.readback_fields = 65535;
+    let mut owner = RemoteBase::new(configuration(), caps).unwrap();
+    let mut backend = Backend::default();
+    tick(&mut owner, &mut backend, 0, Activity::default()).unwrap();
+    backend.read_delay_ms = 2_000;
+    tick(&mut owner, &mut backend, 1_000, Activity::default()).unwrap();
+    backend.events.clear();
+    tick(&mut owner, &mut backend, 3_001, Activity::default()).unwrap();
+    assert!(!backend.events.contains(&"read"));
+    tick(&mut owner, &mut backend, 4_000, Activity::default()).unwrap();
+    assert!(backend.events.contains(&"read"));
+}
+
+#[test]
+fn remote_inactive_shared_offset_readback_is_not_a_tune_failure() {
+    let mut caps = capabilities();
+    caps.readback_fields = 65535;
+    let config = configuration();
+    let mut observed = config.memories[0].state.clone();
+    observed.rit_hz = 125;
+    observed.xit_hz = 125;
+    let mut backend = Backend {
+        read_override: Some(observed.clone()),
+        ..Backend::default()
+    };
+    let mut owner = RemoteBase::new(config, caps).unwrap();
+    owner.advance(0, Activity::default(), &mut backend).unwrap();
+    assert!(owner.snapshot().verified);
+    assert_eq!(owner.snapshot().observed.unwrap(), observed);
+}
+
+#[test]
 fn remote_decode_control_does_not_replace_external_qualification() {
     let mut config = configuration();
     config.memories[0].state.decode = Signaling {
@@ -172,6 +257,8 @@ fn remote_base_rejects_unsafe_complete_state() {
         state.transmit_hz = Some(transmit_hz);
         state.rit_hz = rit_hz;
         state.xit_hz = xit_hz;
+        state.rit_enabled = rit_hz != 0;
+        state.xit_enabled = xit_hz != 0;
         state.mode = mode;
         state.power_mw = Some(power_mw);
         assert!(RemoteBase::new(invalid, capabilities.clone()).is_err());
@@ -262,7 +349,7 @@ fn remote_poll_uses_configured_monotonic_interval() {
     let mut config = configuration();
     config.poll_interval_ms = 200;
     let mut caps = capabilities();
-    caps.readback_fields = 16383;
+    caps.readback_fields = 65535;
     let mut owner = RemoteBase::new(config, caps).unwrap();
     let mut backend = Backend::default();
     owner.advance(0, Activity::default(), &mut backend).unwrap();
@@ -288,6 +375,7 @@ struct Backend {
     events: Vec<&'static str>,
     clock_ms: u64,
     apply_delay_ms: u64,
+    read_delay_ms: u64,
     transmit_epoch: u64,
     overlap_next_apply: bool,
 }
@@ -297,6 +385,7 @@ impl RigBackend for Backend {
         capabilities()
     }
     fn read_state(&mut self) -> Result<OperatingState, i32> {
+        self.clock_ms += self.read_delay_ms;
         self.events.push("read");
         self.read_override
             .clone()
@@ -945,7 +1034,7 @@ fn remote_retired_generation_cannot_apply() {
 #[test]
 fn remote_observed_unsafe_front_panel_state_closes_receive_and_transmit() {
     let mut caps = capabilities();
-    caps.readback_fields = 16383;
+    caps.readback_fields = 65535;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();
@@ -962,7 +1051,7 @@ fn remote_observed_unsafe_front_panel_state_closes_receive_and_transmit() {
 #[test]
 fn remote_readback_mismatch_does_not_report_success() {
     let mut caps = capabilities();
-    caps.readback_fields = 16383;
+    caps.readback_fields = 65535;
     let config = configuration();
     let mut different = config.memories[0].state.clone();
     different.receive_hz = 146_560_000;
@@ -1015,7 +1104,7 @@ fn remote_bounded_completion_is_retained_until_drained() {
 #[test]
 fn remote_unkey_precedes_periodic_readback() {
     let mut caps = capabilities();
-    caps.readback_fields = 16383;
+    caps.readback_fields = 65535;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();
@@ -1041,7 +1130,7 @@ fn remote_unkey_precedes_periodic_readback() {
 #[test]
 fn remote_front_panel_tuning_is_preserved_when_changing_another_setting() {
     let mut caps = capabilities();
-    caps.readback_fields = 16383;
+    caps.readback_fields = 65535;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();
