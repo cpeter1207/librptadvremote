@@ -416,9 +416,7 @@ extern "C" fn create(setup: *const Setup, out: *mut *mut c_void) -> i32 {
             return INVALID;
         }
         // SAFETY: callers supply aligned writable out storage when non-null.
-        let Some(out) = (unsafe { out.as_mut() }) else {
-            return INVALID;
-        };
+        let out = unsafe { &mut *out };
         *out = std::ptr::null_mut();
         if setup.is_null() || !setup.is_aligned() {
             return INVALID;
@@ -516,3 +514,8 @@ static API: Api = Api {
 pub extern "C" fn rptadv_remote_api_v1() -> *const Api {
     &API
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+#[path = "ffi_tests.rs"]
+pub(crate) mod tests;
