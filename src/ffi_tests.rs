@@ -80,6 +80,15 @@ fn with_setup(test: impl FnOnce(&mut Setup)) {
 }
 
 pub(crate) fn with_owner(test: impl FnOnce(*mut c_void)) {
+    with_owner_mode(true, true, true, test);
+}
+
+pub(crate) fn with_owner_mode(
+    scanning: bool,
+    readback: bool,
+    tune: bool,
+    test: impl FnOnce(*mut c_void),
+) {
     struct Owner(*mut c_void);
     impl Drop for Owner {
         fn drop(&mut self) {
@@ -87,6 +96,15 @@ pub(crate) fn with_owner(test: impl FnOnce(*mut c_void)) {
         }
     }
     with_setup(|setup| {
+        if !scanning {
+            setup.scan_lists = span(&[]);
+        }
+        if !readback {
+            setup.capabilities.readback_fields = 0;
+        }
+        if !tune {
+            setup.capabilities.flags &= !8;
+        }
         let mut handle = ptr::null_mut();
         assert_eq!(create(setup, &mut handle), 0);
         let owner = Owner(handle);

@@ -78,7 +78,7 @@ struct ForeignBackend<'a> {
 
 impl RigBackend for ForeignBackend<'_> {
     fn set_tune(&mut self, enabled: bool) -> Result<(), i32> {
-        let call = self.operations.set_tune.ok_or(Error::Unsupported as i32)?;
+        let call = self.operations.set_tune.expect("admitted tune callback");
         // SAFETY: the selected physical owner retains callback/context through advance.
         let code = unsafe { call(self.operations.context, u32::from(enabled)) };
         if code == 0 { Ok(()) } else { Err(code) }
@@ -94,7 +94,10 @@ impl RigBackend for ForeignBackend<'_> {
             .map_or(0, |read| unsafe { read(self.operations.context) })
     }
     fn read_state(&mut self) -> Result<OperatingState, i32> {
-        let read = self.operations.read_state.ok_or(Error::Backend as i32)?;
+        let read = self
+            .operations
+            .read_state
+            .expect("admitted readback callback");
         let mut output = State::from(&OperatingState::default());
         // SAFETY: the validated callback borrows this complete writable record only for return.
         let result = unsafe { read(self.operations.context, &mut output) };
@@ -105,7 +108,10 @@ impl RigBackend for ForeignBackend<'_> {
     }
 
     fn apply_step(&mut self, state: &OperatingState) -> Result<(), i32> {
-        let apply = self.operations.apply_state.ok_or(Error::Backend as i32)?;
+        let apply = self
+            .operations
+            .apply_state
+            .expect("admitted apply callback");
         let state = State::from(state);
         // SAFETY: the callback may read the complete copied state through return, without reentry.
         let result = unsafe { apply(self.operations.context, &state) };
@@ -113,7 +119,7 @@ impl RigBackend for ForeignBackend<'_> {
     }
 
     fn set_ptt(&mut self, keyed: bool) -> Result<(), i32> {
-        let set = self.operations.set_ptt.ok_or(Error::Backend as i32)?;
+        let set = self.operations.set_ptt.expect("admitted PTT callback");
         // SAFETY: the selected physical owner retains the callback and opaque context.
         let result = unsafe { set(self.operations.context, u32::from(keyed)) };
         if result == 0 { Ok(()) } else { Err(result) }
@@ -355,3 +361,8 @@ pub(super) extern "C" fn retire(handle: *mut c_void) -> i32 {
         Ok(0)
     })
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+#[path = "ffi_session_tests.rs"]
+mod tests;
