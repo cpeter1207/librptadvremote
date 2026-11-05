@@ -80,6 +80,8 @@ pub struct OperatingState {
     pub receive_vfo: u32,
     /// Selected transmit VFO.
     pub transmit_vfo: u32,
+    /// Use split-VFO routing independently of repeater shift.
+    pub split: bool,
     /// Repeater shift applied to the transmit VFO.
     pub offset_hz: i64,
     /// Receive incremental tuning.
@@ -207,7 +209,7 @@ pub struct RemoteBaseConfig {
 impl RemoteBaseConfig {
     /// Validate all references and states before a physical owner is created.
     pub fn validate(&self, capabilities: &Capabilities) -> Result<(), Error> {
-        if capabilities.readback_fields & !8191 != 0 {
+        if capabilities.readback_fields & !16383 != 0 {
             return Err(Error::InvalidConfiguration);
         }
         self.limits.validate()?;

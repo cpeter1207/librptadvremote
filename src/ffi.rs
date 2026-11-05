@@ -10,6 +10,7 @@ use std::{
 const TX: u32 = 1;
 const POWER: u32 = 2;
 const CHANNEL: u32 = 4;
+const SPLIT: u32 = 8;
 const INVALID: i32 = Error::InvalidConfiguration as i32;
 
 #[repr(C)]
@@ -85,7 +86,7 @@ pub(super) struct State {
 
 impl State {
     pub(super) fn resolve(&self) -> Result<OperatingState, Error> {
-        if self.flags & !(TX | POWER | CHANNEL) != 0
+        if self.flags & !(TX | POWER | CHANNEL | SPLIT) != 0
             || self.flags & CHANNEL != 0 && self.channel > u32::from(u8::MAX)
         {
             return Err(Error::InvalidConfiguration);
@@ -100,6 +101,7 @@ impl State {
             bandwidth_hz: self.bandwidth_hz,
             receive_vfo: self.receive_vfo,
             transmit_vfo: self.transmit_vfo,
+            split: self.flags & SPLIT != 0,
             power_mw: (self.flags & POWER != 0).then_some(self.power_mw),
             channel: (self.flags & CHANNEL != 0).then_some(self.channel as u8),
             encode: self.encode.resolve()?,
@@ -108,7 +110,8 @@ impl State {
     }
 
     pub(super) fn patch(&self, fields: u64) -> Result<OperatingPatch, Error> {
-        if fields == 0 || fields & !8191 != 0 || self.flags & !(TX | POWER | CHANNEL) != 0 {
+        if fields == 0 || fields & !16383 != 0 || self.flags & !(TX | POWER | CHANNEL | SPLIT) != 0
+        {
             return Err(Error::InvalidConfiguration);
         }
         let mut patch = OperatingPatch::default();
@@ -143,6 +146,9 @@ impl State {
             patch.channel =
                 Some(u8::try_from(self.channel).map_err(|_| Error::InvalidConfiguration)?);
         }
+        if fields & (1 << 13) != 0 {
+            patch.split = Some(self.flags & SPLIT != 0);
+        }
         Ok(patch)
     }
 }
@@ -165,7 +171,8 @@ impl From<&OperatingState> for State {
             xit_hz: state.xit_hz,
             flags: (u32::from(state.transmit_hz.is_some()) * TX)
                 | (u32::from(state.power_mw.is_some()) * POWER)
-                | (u32::from(state.channel.is_some()) * CHANNEL),
+                | (u32::from(state.channel.is_some()) * CHANNEL)
+                | (u32::from(state.split) * SPLIT),
             mode: state.mode as u32,
             bandwidth_hz: state.bandwidth_hz,
             receive_vfo: state.receive_vfo,

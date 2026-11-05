@@ -188,6 +188,16 @@ int main(void)
     assert(fixture.tone == 0 && fixture.keyed == 0);
     assert(api->take_completion(handle, &completion) == 0 && completion.request_id == request_id && completion.result == -10);
     activity.flags = 0;
+    RptAdvRemoteRequest split = {
+        .struct_size = sizeof(split), .abi_version = 1,
+        .kind = RPTADV_REMOTE_SET, .fields = UINT64_C(1) << 13,
+        .state = snapshot.applied,
+    };
+    split.state.flags |= 8;
+    assert(api->request(handle, &split, 8, &request_id) == 0);
+    assert(api->advance(handle, 8, &activity, &backend) == 0);
+    assert(api->take_completion(handle, &completion) == 0 && completion.result == 0);
+    assert(api->snapshot(handle, &snapshot) == 0 && (snapshot.applied.flags & 8) != 0);
     assert(api->retire(handle) == 0);
     assert(api->advance(handle, 5, &activity, &backend) == -10);
     api->destroy(handle);

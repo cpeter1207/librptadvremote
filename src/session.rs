@@ -63,6 +63,8 @@ pub struct OperatingPatch {
     pub receive_vfo: Option<u32>,
     /// New transmit VFO.
     pub transmit_vfo: Option<u32>,
+    /// Explicit split routing, independent of the TX-frequency value.
+    pub split: Option<bool>,
     /// New repeater shift.
     pub offset_hz: Option<i64>,
     /// New receive incremental tuning.
@@ -91,6 +93,7 @@ impl OperatingPatch {
             bandwidth_hz,
             receive_vfo,
             transmit_vfo,
+            split,
             offset_hz,
             rit_hz,
             xit_hz,
@@ -800,7 +803,8 @@ impl RemoteBase {
         }
         merge!(0 => receive_hz, 1 => transmit_hz, 2 => mode, 3 => bandwidth_hz,
             4 => receive_vfo, 5 => transmit_vfo, 6 => offset_hz, 7 => rit_hz,
-            8 => xit_hz, 9 => power_mw, 10 => encode, 11 => decode, 12 => channel);
+            8 => xit_hz, 9 => power_mw, 10 => encode, 11 => decode, 12 => channel,
+            13 => split);
         // A physical TX VFO still exists for a receive-only memory. Readback
         // cannot grant permission to use it; keep the untouched raw observation.
         if self
@@ -842,7 +846,7 @@ impl RemoteBase {
             }
             expected == observed
         });
-        self.snapshot.verified = matches && fields == 8191;
+        self.snapshot.verified = matches && fields == 16383;
         if !applying {
             // An allowed front-panel change becomes the base for later partial
             // commands; a power edit must not restore a stale VFO frequency.
@@ -850,7 +854,7 @@ impl RemoteBase {
             if self.pending.is_none() {
                 self.snapshot.requested = observed;
             }
-            self.snapshot.verified = fields == 8191;
+            self.snapshot.verified = fields == 16383;
             self.snapshot.receive_permitted = true;
             self.update_admission();
         }

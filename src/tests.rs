@@ -82,6 +82,42 @@ fn remote_decode_control_does_not_replace_external_qualification() {
 }
 
 #[test]
+fn remote_split_selection_is_independent_of_repeater_shift_and_vfo_frequency() {
+    let mut owner = RemoteBase::new(configuration(), capabilities()).unwrap();
+    let mut backend = Backend::default();
+    tick(&mut owner, &mut backend, 0, Activity::default()).unwrap();
+    let id = owner
+        .request(
+            RigRequest::Set(OperatingPatch {
+                split: Some(true),
+                ..OperatingPatch::default()
+            }),
+            1,
+        )
+        .unwrap();
+    tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+    assert_eq!(owner.take_completion().unwrap().id, id);
+    let applied = owner.snapshot().applied.unwrap();
+    assert!(applied.split);
+    assert_eq!(applied.transmit_hz, Some(applied.receive_hz));
+    assert_eq!(applied.offset_hz, 0);
+    owner
+        .request(
+            RigRequest::Set(OperatingPatch {
+                offset_hz: Some(-600000),
+                split: Some(false),
+                ..OperatingPatch::default()
+            }),
+            2,
+        )
+        .unwrap();
+    tick(&mut owner, &mut backend, 2, Activity::default()).unwrap();
+    let applied = owner.snapshot().applied.unwrap();
+    assert!(!applied.split);
+    assert_eq!(applied.offset_hz, -600000);
+}
+
+#[test]
 fn remote_hardware_coverage_keeps_mode_and_power_on_each_range() {
     let mut config = configuration();
     config.limits.modes.push(Mode::Usb);
@@ -226,7 +262,7 @@ fn remote_poll_uses_configured_monotonic_interval() {
     let mut config = configuration();
     config.poll_interval_ms = 200;
     let mut caps = capabilities();
-    caps.readback_fields = 8191;
+    caps.readback_fields = 16383;
     let mut owner = RemoteBase::new(config, caps).unwrap();
     let mut backend = Backend::default();
     owner.advance(0, Activity::default(), &mut backend).unwrap();
@@ -909,7 +945,7 @@ fn remote_retired_generation_cannot_apply() {
 #[test]
 fn remote_observed_unsafe_front_panel_state_closes_receive_and_transmit() {
     let mut caps = capabilities();
-    caps.readback_fields = 8191;
+    caps.readback_fields = 16383;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();
@@ -926,7 +962,7 @@ fn remote_observed_unsafe_front_panel_state_closes_receive_and_transmit() {
 #[test]
 fn remote_readback_mismatch_does_not_report_success() {
     let mut caps = capabilities();
-    caps.readback_fields = 8191;
+    caps.readback_fields = 16383;
     let config = configuration();
     let mut different = config.memories[0].state.clone();
     different.receive_hz = 146_560_000;
@@ -979,7 +1015,7 @@ fn remote_bounded_completion_is_retained_until_drained() {
 #[test]
 fn remote_unkey_precedes_periodic_readback() {
     let mut caps = capabilities();
-    caps.readback_fields = 8191;
+    caps.readback_fields = 16383;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();
@@ -1005,7 +1041,7 @@ fn remote_unkey_precedes_periodic_readback() {
 #[test]
 fn remote_front_panel_tuning_is_preserved_when_changing_another_setting() {
     let mut caps = capabilities();
-    caps.readback_fields = 8191;
+    caps.readback_fields = 16383;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();

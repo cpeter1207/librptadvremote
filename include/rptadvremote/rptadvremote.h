@@ -60,7 +60,7 @@ typedef struct RptAdvRemoteState {
     int64_t offset_hz; /**< Transmit repeater shift. */
     int64_t rit_hz; /**< Receive incremental tuning. */
     int64_t xit_hz; /**< Transmit incremental tuning. */
-    uint32_t flags; /**< Only TX, POWER, and CHANNEL presence flags. */
+    uint32_t flags; /**< TX1, POWER2, CHANNEL4 presence; bit8 enables split-VFO routing. */
     uint32_t mode; /**< Canonical mode, independent of Hamlib flags. */
     uint32_t bandwidth_hz; /**< Zero selects normal backend width. */
     uint32_t receive_vfo; /**< Canonical receive VFO selector. */
@@ -148,8 +148,8 @@ enum RptAdvRemoteRequestKind {
     RPTADV_REMOTE_TUNE = 13 /**< Bounded existing test-tone operation, value_ms1..5000. */
 };
 /** Ordered patch bits: RX, TX, mode, width, RX/TX VFO, offset, RIT, XIT,
- * power, encode, decode, channel. Unknown bits are rejected. */
-#define RPTADV_REMOTE_PATCH_ALL UINT64_C(8191)
+ * power, encode, decode, channel, split routing. Unknown bits are rejected. */
+#define RPTADV_REMOTE_PATCH_ALL UINT64_C(16383)
 /** A live operation, copied before request returns. */
 typedef struct RptAdvRemoteRequest {
     uint32_t struct_size; /**< Exact record size. */
