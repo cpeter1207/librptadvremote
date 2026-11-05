@@ -51,6 +51,87 @@ fn capabilities() -> Capabilities {
 }
 
 #[test]
+fn configuration_contract_rejects_empty_and_ambiguous_memory_and_scan_definitions() {
+    type Invalid = (&'static str, fn(&mut RemoteBaseConfig));
+    let cases: &[Invalid] = &[
+        ("zero memory", |config| config.memories[0].selector = 0),
+        ("unnamed memory", |config| config.memories[0].name.clear()),
+        ("duplicate memory selector", |config| {
+            config.memories.push(config.memories[0].clone())
+        }),
+        ("duplicate memory name", |config| {
+            let mut memory = config.memories[0].clone();
+            memory.selector = 2;
+            config.memories.push(memory);
+        }),
+        ("zero list", |config| config.scan_lists[0].selector = 0),
+        ("unnamed list", |config| config.scan_lists[0].name.clear()),
+        ("empty list", |config| config.scan_lists[0].members.clear()),
+        ("zero dwell", |config| config.scan_lists[0].dwell_ms = 0),
+        ("deadline overflow", |config| {
+            config.scan_lists[0].settle_ms = u64::MAX
+        }),
+        ("duplicate list selector", |config| {
+            config.scan_lists.push(config.scan_lists[0].clone())
+        }),
+        ("duplicate list name", |config| {
+            let mut list = config.scan_lists[0].clone();
+            list.selector = 2;
+            config.scan_lists.push(list);
+        }),
+        ("unlisted priority", |config| {
+            config.scan_lists[0].priority = Some(2)
+        }),
+    ];
+    for (name, mutate) in cases {
+        let mut config = configuration();
+        mutate(&mut config);
+        assert_eq!(
+            config.validate(&capabilities()),
+            Err(Error::InvalidConfiguration),
+            "{name}"
+        );
+    }
+    let mut caps = capabilities();
+    caps.readback_fields = 1 << 16;
+    assert_eq!(
+        configuration().validate(&caps),
+        Err(Error::InvalidConfiguration)
+    );
+    let mut valid = configuration();
+    let mut memory = valid.memories[0].clone();
+    memory.selector = 2;
+    memory.name = "second".into();
+    valid.memories.push(memory);
+    let mut list = valid.scan_lists[0].clone();
+    list.selector = 2;
+    list.name = "second list".into();
+    list.members = vec![2];
+    valid.scan_lists.push(list);
+    assert_eq!(valid.validate(&capabilities()), Ok(()));
+}
+
+#[test]
+fn hardware_range_contract_requires_frequency_mode_and_power_membership() {
+    let range = HardwareRange {
+        frequency: FrequencyRange::new(144_000_000, 148_000_000),
+        modes: vec![Mode::Fm],
+        minimum_power_mw: Some(1000),
+        maximum_power_mw: Some(5000),
+    };
+    for (frequency, mode, expected) in [
+        (146_520_000, Mode::Fm, true),
+        (140_000_000, Mode::Fm, false),
+        (146_520_000, Mode::Usb, false),
+    ] {
+        assert_eq!(range.covers(frequency, mode), expected);
+    }
+    for (power, expected) in [(0, false), (1000, true), (5000, true), (5001, false)] {
+        assert_eq!(range.permits_power(power), expected);
+    }
+}
+
+#[test]
 fn rf_limits_distinguish_stored_incremental_offsets_from_enabled_shifts() {
     let config = configuration();
     let mut state = config.memories[0].state.clone();
