@@ -801,6 +801,16 @@ impl RemoteBase {
         merge!(0 => receive_hz, 1 => transmit_hz, 2 => mode, 3 => bandwidth_hz,
             4 => receive_vfo, 5 => transmit_vfo, 6 => offset_hz, 7 => rit_hz,
             8 => xit_hz, 9 => power_mw, 10 => encode, 11 => decode, 12 => channel);
+        // A physical TX VFO still exists for a receive-only memory. Readback
+        // cannot grant permission to use it; keep the untouched raw observation.
+        if self
+            .snapshot
+            .applied
+            .as_ref()
+            .is_some_and(|state| state.transmit_hz.is_none())
+        {
+            observed.transmit_hz = None;
+        }
         let validation = self
             .config
             .limits
@@ -825,6 +835,10 @@ impl RemoteBase {
             }
             if expected.transmit_vfo == 0 {
                 expected.transmit_vfo = observed.transmit_vfo;
+            }
+            // Unspecified means leave the radio's power setting unchanged.
+            if expected.power_mw.is_none() {
+                expected.power_mw = observed.power_mw;
             }
             expected == observed
         });

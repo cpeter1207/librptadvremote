@@ -354,6 +354,72 @@ fn remote_physical_ptt_follows_rendered_audio_not_raw_burst_edges() {
 }
 
 #[test]
+fn remote_receive_only_policy_survives_a_readable_radio_transmit_vfo() {
+    let mut config = configuration();
+    let physical = config.memories[0].state.clone();
+    config.memories[0].state.transmit_hz = None;
+    let mut caps = capabilities();
+    caps.readback_fields = 2;
+    let mut owner = RemoteBase::new(config, caps).unwrap();
+    let mut backend = Backend {
+        read_override: Some(physical),
+        ..Backend::default()
+    };
+    tick(&mut owner, &mut backend, 0, Activity::default()).unwrap();
+    assert!(owner.snapshot().transmit_inhibited);
+    tick(
+        &mut owner,
+        &mut backend,
+        500,
+        Activity {
+            transmit_requested: true,
+            rendered_ptt: true,
+            ..Activity::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(owner.snapshot().applied.as_ref().unwrap().transmit_hz, None);
+    assert!(
+        owner
+            .snapshot()
+            .observed
+            .as_ref()
+            .unwrap()
+            .transmit_hz
+            .is_some()
+    );
+    assert!(owner.snapshot().transmit_inhibited);
+    assert_eq!(backend.keys.last(), Some(&false));
+}
+
+#[test]
+fn remote_unspecified_power_accepts_actual_readback_without_claiming_zero_power() {
+    let mut config = configuration();
+    let mut physical = config.memories[0].state.clone();
+    physical.power_mw = Some(3000);
+    config.memories[0].state.power_mw = None;
+    config.limits.maximum_power_mw = None;
+    let mut caps = capabilities();
+    caps.readback_fields = 1 << 9;
+    let mut owner = RemoteBase::new(config, caps).unwrap();
+    let mut backend = Backend {
+        read_override: Some(physical),
+        ..Backend::default()
+    };
+    tick(&mut owner, &mut backend, 0, Activity::default()).unwrap();
+    assert_eq!(owner.snapshot().requested.power_mw, None);
+    assert_eq!(
+        owner.snapshot().observed.as_ref().unwrap().power_mw,
+        Some(3000)
+    );
+    tick(&mut owner, &mut backend, 500, Activity::default()).unwrap();
+    assert_eq!(
+        owner.snapshot().applied.as_ref().unwrap().power_mw,
+        Some(3000)
+    );
+}
+
+#[test]
 fn remote_manual_tune_waits_for_rendering_and_retains_existing_turnoff() {
     let (mut owner, mut backend) = scanning();
     let id = owner
