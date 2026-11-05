@@ -3,6 +3,9 @@ use super::*;
 #[path = "limits_tests.rs"]
 mod limits_contract;
 
+#[path = "scan_tests.rs"]
+mod scan_contract;
+
 fn configuration() -> RemoteBaseConfig {
     RemoteBaseConfig {
         limits: Limits {
