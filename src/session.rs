@@ -6,8 +6,6 @@ use crate::{
 
 /// Physical calls supplied by the selected dependency adapter and GPIO owner.
 pub trait RigBackend {
-    /// Actual operations and signal providers available during setup.
-    fn capabilities(&self) -> Capabilities;
     /// Read actual supported fields; only `Capabilities::readback_fields` are
     /// observations. Other record fields are ignored, never fabricated readback.
     fn read_state(&mut self) -> Result<OperatingState, i32>;

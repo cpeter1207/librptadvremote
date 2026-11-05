@@ -74,7 +74,6 @@ pub(super) struct RawScanSnapshot {
 
 struct ForeignBackend<'a> {
     operations: &'a Backend,
-    capabilities: Capabilities,
 }
 
 impl RigBackend for ForeignBackend<'_> {
@@ -94,10 +93,6 @@ impl RigBackend for ForeignBackend<'_> {
             .transmit_epoch
             .map_or(0, |read| unsafe { read(self.operations.context) })
     }
-    fn capabilities(&self) -> Capabilities {
-        self.capabilities.clone()
-    }
-
     fn read_state(&mut self) -> Result<OperatingState, i32> {
         let read = self.operations.read_state.ok_or(Error::Backend as i32)?;
         let mut output = State::from(&OperatingState::default());
@@ -268,10 +263,7 @@ pub(super) extern "C" fn advance(
         {
             return Err(Error::InvalidConfiguration);
         }
-        let mut backend = ForeignBackend {
-            operations,
-            capabilities: owner.capabilities().clone(),
-        };
+        let mut backend = ForeignBackend { operations };
         owner.advance(
             now_ms,
             Activity {

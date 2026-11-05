@@ -462,9 +462,6 @@ struct Backend {
 }
 
 impl RigBackend for Backend {
-    fn capabilities(&self) -> Capabilities {
-        capabilities()
-    }
     fn read_state(&mut self) -> Result<OperatingState, i32> {
         self.clock_ms += self.read_delay_ms;
         self.events.push("read");
