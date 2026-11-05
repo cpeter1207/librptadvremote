@@ -41,6 +41,7 @@ pub(super) struct Snapshot {
     applied: State,
     observed: State,
     failure_code: i32,
+    observed_fields: u64,
 }
 
 #[repr(C)]
@@ -161,7 +162,7 @@ pub(super) extern "C" fn advance(
             || operations.abi_version != 1
             || operations.apply_state.is_none()
             || operations.set_ptt.is_none()
-            || owner.capabilities().readback && operations.read_state.is_none()
+            || owner.capabilities().readback_fields != 0 && operations.read_state.is_none()
         {
             return Err(Error::InvalidConfiguration);
         }
@@ -216,6 +217,7 @@ pub(super) extern "C" fn snapshot(handle: *const c_void, output: *mut Snapshot) 
                 .map(State::from)
                 .unwrap_or_else(empty),
             failure_code: value.failure.map_or(0, |failure| failure.code),
+            observed_fields: value.observed_fields,
         };
         // SAFETY: the same admitted output span is exclusively writable through return.
         unsafe {

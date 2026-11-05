@@ -27,6 +27,7 @@ fn configuration() -> RemoteBaseConfig {
             ..ScanList::default()
         }],
         startup_memory: 1,
+        poll_interval_ms: 0,
     }
 }
 
@@ -84,6 +85,87 @@ fn remote_base_rejects_unsafe_complete_state() {
     unsupported_source.memories[0].state.encode.source = SignalSource::Rig;
     unsupported_source.memories[0].state.encode.enabled = true;
     assert!(RemoteBase::new(unsupported_source, capabilities).is_err());
+}
+
+#[test]
+fn remote_external_signaling_does_not_require_a_programmable_tone() {
+    let mut config = configuration();
+    config.memories[0].state.encode = Signaling {
+        source: SignalSource::External,
+        enabled: true,
+        ..Signaling::default()
+    };
+    assert!(RemoteBase::new(config.clone(), capabilities()).is_ok());
+    config.memories[0].state.encode.source = SignalSource::Dsp;
+    assert_eq!(
+        RemoteBase::new(config, capabilities()).err(),
+        Some(Error::Signaling)
+    );
+}
+
+#[test]
+fn remote_signaling_validates_actual_dcs_bits_and_exclusive_tones() {
+    for (tone, code, inverted) in [(0, 512, false), (1148, 0o23, false), (1148, 0, true)] {
+        let mut config = configuration();
+        config.memories[0].state.encode = Signaling {
+            source: SignalSource::Dsp,
+            enabled: true,
+            ctcss_tenths_hz: tone,
+            dcs_code: code,
+            inverted,
+        };
+        assert_eq!(
+            RemoteBase::new(config, capabilities()).err(),
+            Some(Error::Signaling)
+        );
+    }
+}
+
+#[test]
+fn remote_partial_readback_does_not_invent_missing_observations() {
+    let mut caps = capabilities();
+    caps.readback_fields = 1 | 4;
+    let mut owner = RemoteBase::new(configuration(), caps).unwrap();
+    let mut backend = Backend {
+        read_override: Some(OperatingState {
+            receive_hz: 146_520_000,
+            ..OperatingState::default()
+        }),
+        ..Backend::default()
+    };
+    owner.advance(0, Activity::default(), &mut backend).unwrap();
+    assert_eq!(owner.snapshot().observed_fields, 5);
+    assert!(!owner.snapshot().verified);
+    assert_eq!(
+        owner.snapshot().applied.as_ref().unwrap().power_mw,
+        Some(5_000)
+    );
+    backend.read_override.as_mut().unwrap().receive_hz = 149_000_000;
+    assert_eq!(
+        owner.advance(500, Activity::default(), &mut backend),
+        Err(Error::ReceiveFrequency)
+    );
+    assert!(!owner.snapshot().receive_permitted);
+}
+
+#[test]
+fn remote_poll_uses_configured_monotonic_interval() {
+    let mut config = configuration();
+    config.poll_interval_ms = 200;
+    let mut caps = capabilities();
+    caps.readback_fields = 8191;
+    let mut owner = RemoteBase::new(config, caps).unwrap();
+    let mut backend = Backend::default();
+    owner.advance(0, Activity::default(), &mut backend).unwrap();
+    backend.events.clear();
+    owner
+        .advance(199, Activity::default(), &mut backend)
+        .unwrap();
+    assert!(!backend.events.contains(&"read"));
+    owner
+        .advance(200, Activity::default(), &mut backend)
+        .unwrap();
+    assert!(backend.events.contains(&"read"));
 }
 
 #[derive(Default)]
@@ -229,7 +311,7 @@ fn remote_retired_generation_cannot_apply() {
 #[test]
 fn remote_observed_unsafe_front_panel_state_closes_receive_and_transmit() {
     let mut caps = capabilities();
-    caps.readback = true;
+    caps.readback_fields = 8191;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();
@@ -246,7 +328,7 @@ fn remote_observed_unsafe_front_panel_state_closes_receive_and_transmit() {
 #[test]
 fn remote_readback_mismatch_does_not_report_success() {
     let mut caps = capabilities();
-    caps.readback = true;
+    caps.readback_fields = 8191;
     let config = configuration();
     let mut different = config.memories[0].state.clone();
     different.receive_hz = 146_560_000;
@@ -298,7 +380,7 @@ fn remote_bounded_completion_is_retained_until_drained() {
 #[test]
 fn remote_unkey_precedes_periodic_readback() {
     let mut caps = capabilities();
-    caps.readback = true;
+    caps.readback_fields = 8191;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();
@@ -323,7 +405,7 @@ fn remote_unkey_precedes_periodic_readback() {
 #[test]
 fn remote_front_panel_tuning_is_preserved_when_changing_another_setting() {
     let mut caps = capabilities();
-    caps.readback = true;
+    caps.readback_fields = 8191;
     let mut radio = RemoteBase::new(configuration(), caps).unwrap();
     let mut backend = Backend::default();
     radio.advance(0, Activity::default(), &mut backend).unwrap();

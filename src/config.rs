@@ -57,7 +57,7 @@ pub struct Signaling {
     pub enabled: bool,
     /// CTCSS in tenths of hertz, or zero when DCS/no tone is selected.
     pub ctcss_tenths_hz: u32,
-    /// DCS code, or zero when CTCSS/no code is selected.
+    /// Actual nine-bit DCS value (not decimal-spelled octal digits), or zero.
     pub dcs_code: u32,
     /// Inverted DCS polarity.
     pub inverted: bool,
@@ -109,8 +109,9 @@ pub struct Capabilities {
     pub encode_sources: Vec<SignalSource>,
     /// Supported decode providers; does not imply encode support.
     pub decode_sources: Vec<SignalSource>,
-    /// Whether full operating-state readback is available.
-    pub readback: bool,
+    /// Readable state-field mask, in the same order as an operating patch.
+    /// Zero means write-only; unavailable fields are never observations.
+    pub readback_fields: u64,
 }
 
 /// Named configuration-only memory with a stable numeric selector.
@@ -168,11 +169,16 @@ pub struct RemoteBaseConfig {
     pub scan_lists: Vec<ScanList>,
     /// Safe memory selected on startup.
     pub startup_memory: u32,
+    /// Monotonic readback interval; zero selects the 500 ms default.
+    pub poll_interval_ms: u64,
 }
 
 impl RemoteBaseConfig {
     /// Validate all references and states before a physical owner is created.
     pub fn validate(&self, capabilities: &Capabilities) -> Result<(), Error> {
+        if capabilities.readback_fields & !8191 != 0 {
+            return Err(Error::InvalidConfiguration);
+        }
         self.limits.validate()?;
         for (index, memory) in self.memories.iter().enumerate() {
             if memory.selector == 0

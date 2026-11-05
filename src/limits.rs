@@ -133,9 +133,14 @@ fn contains(ranges: &[FrequencyRange], frequency: u64) -> bool {
 
 fn validate_signal(signal: Signaling, supported: &[SignalSource]) -> Result<(), Error> {
     if signal.source != SignalSource::Disabled && !supported.contains(&signal.source)
+        || signal.dcs_code > 511
+        || signal.ctcss_tenths_hz != 0 && (signal.dcs_code != 0 || signal.inverted)
+        || signal.source == SignalSource::Rig && signal.inverted
         || signal.enabled
             && (signal.source == SignalSource::Disabled
-                || (signal.ctcss_tenths_hz == 0) == (signal.dcs_code == 0))
+                || signal.source != SignalSource::External
+                    && signal.ctcss_tenths_hz == 0
+                    && signal.dcs_code == 0)
     {
         return Err(Error::Signaling);
     }

@@ -15,8 +15,6 @@ extern "C" {
 #define RPTADV_REMOTE_POWER 2u
 /** State flag: the channel field is present. */
 #define RPTADV_REMOTE_CHANNEL 4u
-/** Capability flag: complete state readback is available. */
-#define RPTADV_REMOTE_READBACK 8u
 /** Canonical FM mode identifier; masks use one shifted by the identifier. */
 #define RPTADV_REMOTE_FM 1u
 
@@ -35,7 +33,7 @@ typedef struct RptAdvRemoteSignal {
     uint32_t source; /**< 0 disabled, 1 DSP, 2 external, 3 rig. */
     uint32_t enabled; /**< Exactly zero or one. */
     uint32_t ctcss_tenths_hz; /**< Tone in tenths of hertz, otherwise zero. */
-    uint32_t dcs_code; /**< DCS code, otherwise zero. */
+    uint32_t dcs_code; /**< Actual nine-bit DCS code, otherwise zero. */
     uint32_t inverted; /**< Exactly zero or one. */
 } RptAdvRemoteSignal;
 /** Complete configured state; this record does not claim physical observation. */
@@ -69,7 +67,8 @@ typedef struct RptAdvRemoteCapabilities {
     RptAdvRemoteRanges receive; /**< Actual RX coverage. */
     RptAdvRemoteRanges transmit; /**< Actual TX coverage. */
     uint64_t mode_mask; /**< Modes the backend can apply. */
-    uint32_t flags; /**< POWER and READBACK only. */
+    uint64_t readback_fields; /**< Actually readable operating-patch field bits. */
+    uint32_t flags; /**< POWER only. */
     uint32_t encode_sources; /**< Bit mask, one shifted by source identifier. */
     uint32_t decode_sources; /**< Independent decode provider mask. */
 } RptAdvRemoteCapabilities;
@@ -111,6 +110,7 @@ typedef struct RptAdvRemoteSetup {
     RptAdvRemoteMemories memories; /**< Immutable configured memories. */
     RptAdvRemoteScans scan_lists; /**< Immutable configured lists. */
     uint32_t startup_memory; /**< Existing safe memory selected at startup. */
+    uint64_t poll_interval_ms; /**< Monotonic readback interval; zero selects 500 ms. */
 } RptAdvRemoteSetup;
 /** Request kinds; definitions themselves cannot be edited. */
 enum RptAdvRemoteRequestKind {
@@ -180,6 +180,7 @@ typedef struct RptAdvRemoteSnapshot {
     RptAdvRemoteState applied; /**< Valid when APPLIED is present. */
     RptAdvRemoteState observed; /**< Valid when OBSERVED is present. */
     int32_t failure_code; /**< First dependency cause when FAILED is present. */
+    uint64_t observed_fields; /**< Only these operating-patch fields are observations. */
 } RptAdvRemoteSnapshot;
 /** One retained final result; request ID zero is not a user operation. */
 typedef struct RptAdvRemoteCompletion {

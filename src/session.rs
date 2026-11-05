@@ -6,7 +6,8 @@ use crate::{Capabilities, Error, OperatingState, RemoteBaseConfig};
 pub trait RigBackend {
     /// Actual operations and signal providers available during setup.
     fn capabilities(&self) -> Capabilities;
-    /// Read the supported complete operating state; never fabricate an observation.
+    /// Read actual supported fields; only `Capabilities::readback_fields` are
+    /// observations. Other record fields are ignored, never fabricated readback.
     fn read_state(&mut self) -> Result<OperatingState, i32>;
     /// Apply a prepared complete state; failure may leave partial physical changes.
     fn apply_step(&mut self, state: &OperatingState) -> Result<(), i32>;
@@ -128,6 +129,8 @@ pub struct RigSnapshot {
     pub applied: Option<OperatingState>,
     /// Last actual supported readback, if any.
     pub observed: Option<OperatingState>,
+    /// Fields actually present in the observation, using operating-patch bits.
+    pub observed_fields: u64,
     /// Readback confirmed the current applied state.
     pub verified: bool,
     /// Receive routing is safe under the observed/current policy.
@@ -178,6 +181,7 @@ impl RemoteBase {
                 requested: state,
                 applied: None,
                 observed: None,
+                observed_fields: 0,
                 verified: false,
                 receive_permitted: false,
                 transmit_inhibited: true,
@@ -301,19 +305,27 @@ impl RemoteBase {
                     result,
                 });
             }
-            self.next_poll_ms = now_ms.saturating_add(500);
+            self.next_poll_ms = now_ms.saturating_add(self.poll_interval_ms());
             // Physical I/O may have blocked. Read a fresh activity snapshot on the
             // next service iteration before admitting any new PTT.
             return result;
         }
-        if self.capabilities.readback && now_ms >= self.next_poll_ms {
-            self.next_poll_ms = now_ms.saturating_add(500);
+        if self.capabilities.readback_fields != 0 && now_ms >= self.next_poll_ms {
+            self.next_poll_ms = now_ms.saturating_add(self.poll_interval_ms());
             self.observe(backend, false)?;
         }
         let keyed = activity.transmit_requested
             && !self.snapshot.transmit_inhibited
             && (self.pending.is_none() || activity.physical_ptt);
         self.set_key(keyed, backend)
+    }
+
+    fn poll_interval_ms(&self) -> u64 {
+        if self.config.poll_interval_ms == 0 {
+            500
+        } else {
+            self.config.poll_interval_ms
+        }
     }
 
     fn update_admission(&mut self) {
@@ -347,6 +359,7 @@ impl RemoteBase {
     fn record_failure(&mut self, code: i32) {
         self.snapshot.failure.get_or_insert(Failure { code });
         self.safe = false;
+        self.snapshot.receive_permitted = false;
         self.snapshot.verified = false;
         self.update_admission();
     }
@@ -370,13 +383,11 @@ impl RemoteBase {
         }
         self.snapshot.applied = Some(desired.clone());
         self.snapshot.observed = None;
+        self.snapshot.observed_fields = 0;
         self.snapshot.verified = false;
-        if self.capabilities.readback {
-            self.observe(backend, true)?;
-            if !self.snapshot.verified {
-                self.record_failure(Error::ReadbackMismatch as i32);
-                return Err(Error::ReadbackMismatch);
-            }
+        if self.capabilities.readback_fields != 0 && !self.observe(backend, true)? {
+            self.record_failure(Error::ReadbackMismatch as i32);
+            return Err(Error::ReadbackMismatch);
         }
         self.snapshot.failure = None;
         self.safe = true;
@@ -385,16 +396,30 @@ impl RemoteBase {
         Ok(())
     }
 
-    fn observe(&mut self, backend: &mut dyn RigBackend, applying: bool) -> Result<(), Error> {
-        let observed = backend.read_state().map_err(|code| {
+    fn observe(&mut self, backend: &mut dyn RigBackend, applying: bool) -> Result<bool, Error> {
+        let raw = backend.read_state().map_err(|code| {
             self.record_failure(code);
             Error::Backend
         })?;
+        let mut observed = self
+            .snapshot
+            .applied
+            .as_ref()
+            .unwrap_or(&self.snapshot.requested)
+            .clone();
+        let fields = self.capabilities.readback_fields;
+        macro_rules! merge {
+            ($($bit:literal => $field:ident),* $(,)?) => { $(if fields & (1 << $bit) != 0 { observed.$field = raw.$field; })* };
+        }
+        merge!(0 => receive_hz, 1 => transmit_hz, 2 => mode, 3 => bandwidth_hz,
+            4 => receive_vfo, 5 => transmit_vfo, 6 => offset_hz, 7 => rit_hz,
+            8 => xit_hz, 9 => power_mw, 10 => encode, 11 => decode, 12 => channel);
         let validation = self
             .config
             .limits
             .validate_state(&observed, &self.capabilities);
-        self.snapshot.observed = Some(observed.clone());
+        self.snapshot.observed = Some(raw);
+        self.snapshot.observed_fields = fields;
         if let Err(error) = validation {
             self.safe = false;
             self.snapshot.verified = false;
@@ -403,7 +428,7 @@ impl RemoteBase {
             self.set_key(false, backend)?;
             return Err(error);
         }
-        self.snapshot.verified = self.snapshot.applied.as_ref().is_some_and(|applied| {
+        let matches = self.snapshot.applied.as_ref().is_some_and(|applied| {
             let mut expected = applied.clone();
             if expected.bandwidth_hz == 0 {
                 expected.bandwidth_hz = observed.bandwidth_hz;
@@ -416,6 +441,7 @@ impl RemoteBase {
             }
             expected == observed
         });
+        self.snapshot.verified = matches && fields == 8191;
         if !applying {
             // An allowed front-panel change becomes the base for later partial
             // commands; a power edit must not restore a stale VFO frequency.
@@ -423,10 +449,10 @@ impl RemoteBase {
             if self.pending.is_none() {
                 self.snapshot.requested = observed;
             }
-            self.snapshot.verified = true;
+            self.snapshot.verified = fields == 8191;
             self.snapshot.receive_permitted = true;
             self.update_admission();
         }
-        Ok(())
+        Ok(matches)
     }
 }

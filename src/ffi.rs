@@ -10,7 +10,6 @@ use std::{
 const TX: u32 = 1;
 const POWER: u32 = 2;
 const CHANNEL: u32 = 4;
-const READBACK: u32 = 8;
 const INVALID: i32 = Error::InvalidConfiguration as i32;
 
 #[repr(C)]
@@ -186,6 +185,7 @@ struct RawCapabilities {
     receive: Span<FrequencyRange>,
     transmit: Span<FrequencyRange>,
     mode_mask: u64,
+    readback_fields: u64,
     flags: u32,
     encode_sources: u32,
     decode_sources: u32,
@@ -218,6 +218,7 @@ struct Setup {
     memories: Span<RawMemory>,
     scan_lists: Span<RawScan>,
     startup_memory: u32,
+    poll_interval_ms: u64,
 }
 
 unsafe fn text(data: *const c_char, length: usize) -> Result<String, Error> {
@@ -282,7 +283,7 @@ fn sources(mask: u32) -> Result<Vec<SignalSource>, Error> {
 unsafe fn resolve(setup: &Setup) -> Result<RemoteBase, Error> {
     let limits = &setup.limits;
     let caps = &setup.capabilities;
-    if limits.flags & !POWER != 0 || caps.flags & !(POWER | READBACK) != 0 {
+    if limits.flags & !POWER != 0 || caps.flags & !POWER != 0 {
         return Err(Error::InvalidConfiguration);
     }
     // SAFETY: setup spans are borrowed for this call and copied below.
@@ -333,13 +334,14 @@ unsafe fn resolve(setup: &Setup) -> Result<RemoteBase, Error> {
                 memories,
                 scan_lists,
                 startup_memory: setup.startup_memory,
+                poll_interval_ms: setup.poll_interval_ms,
             },
             Capabilities {
                 receive: caps.receive.read()?.to_vec(),
                 transmit: caps.transmit.read()?.to_vec(),
                 modes: modes(caps.mode_mask)?,
                 power_mw: caps.flags & POWER != 0,
-                readback: caps.flags & READBACK != 0,
+                readback_fields: caps.readback_fields,
                 encode_sources: sources(caps.encode_sources)?,
                 decode_sources: sources(caps.decode_sources)?,
             },
