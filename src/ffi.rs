@@ -188,9 +188,36 @@ struct RawLimits {
     maximum_power_mw: u32,
 }
 #[repr(C)]
+struct RawCoverage {
+    minimum: u64,
+    maximum: u64,
+    mode_mask: u64,
+    flags: u32,
+    minimum_power_mw: u32,
+    maximum_power_mw: u32,
+}
+unsafe fn coverage(span: &Span<RawCoverage>) -> Result<Vec<HardwareRange>, Error> {
+    // SAFETY: setup lends this readable, aligned extent for the synchronous copy.
+    unsafe { span.read()? }
+        .iter()
+        .map(|range| {
+            if range.flags & !3 != 0 {
+                return Err(Error::InvalidConfiguration);
+            }
+            Ok(HardwareRange {
+                frequency: FrequencyRange::new(range.minimum, range.maximum),
+                modes: modes(range.mode_mask)?,
+                minimum_power_mw: (range.flags & 1 != 0).then_some(range.minimum_power_mw),
+                maximum_power_mw: (range.flags & 2 != 0).then_some(range.maximum_power_mw),
+            })
+        })
+        .collect()
+}
+
+#[repr(C)]
 struct RawCapabilities {
-    receive: Span<FrequencyRange>,
-    transmit: Span<FrequencyRange>,
+    receive: Span<RawCoverage>,
+    transmit: Span<RawCoverage>,
     mode_mask: u64,
     readback_fields: u64,
     scan_mode_mask: u64,
@@ -346,8 +373,8 @@ unsafe fn resolve(setup: &Setup) -> Result<RemoteBase, Error> {
                 poll_interval_ms: setup.poll_interval_ms,
             },
             Capabilities {
-                receive: caps.receive.read()?.to_vec(),
-                transmit: caps.transmit.read()?.to_vec(),
+                receive: coverage(&caps.receive)?,
+                transmit: coverage(&caps.transmit)?,
                 modes: modes(caps.mode_mask)?,
                 power_mw: caps.flags & POWER != 0,
                 readback_fields: caps.readback_fields,

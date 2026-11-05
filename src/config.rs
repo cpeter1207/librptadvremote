@@ -97,14 +97,37 @@ pub struct OperatingState {
 }
 
 /// Physical capabilities of the selected rig and its shared signaling providers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HardwareRange {
+    /// Inclusive native hardware frequency interval.
+    pub frequency: crate::FrequencyRange,
+    /// Modes actually supported within this interval.
+    pub modes: Vec<Mode>,
+    /// Established hardware lower power bound when reported.
+    pub minimum_power_mw: Option<u32>,
+    /// Established hardware upper power bound when reported.
+    pub maximum_power_mw: Option<u32>,
+}
+
+impl HardwareRange {
+    pub(crate) fn covers(&self, frequency: u64, mode: Mode) -> bool {
+        self.frequency.contains(frequency) && self.modes.contains(&mode)
+    }
+    pub(crate) fn permits_power(&self, power: u32) -> bool {
+        self.minimum_power_mw.is_none_or(|minimum| power >= minimum)
+            && self.maximum_power_mw.is_none_or(|maximum| power <= maximum)
+    }
+}
+
+/// Physical capabilities of the selected rig and its shared signaling providers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     /// Modes the backend can actually apply.
     pub modes: Vec<Mode>,
     /// Hardware receive coverage.
-    pub receive: Vec<crate::FrequencyRange>,
+    pub receive: Vec<HardwareRange>,
     /// Hardware transmit coverage.
-    pub transmit: Vec<crate::FrequencyRange>,
+    pub transmit: Vec<HardwareRange>,
     /// Whether power can be established in milliwatts.
     pub power_mw: bool,
     /// Supported encode providers.

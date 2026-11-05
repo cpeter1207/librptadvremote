@@ -100,7 +100,12 @@ impl Limits {
             .receive_hz
             .checked_add_signed(state.rit_hz)
             .ok_or(Error::ReceiveFrequency)?;
-        if !contains(&self.receive, receive) || !contains(&caps.receive, receive) {
+        if !contains(&self.receive, receive)
+            || !caps
+                .receive
+                .iter()
+                .any(|range| range.covers(receive, state.mode))
+        {
             return Err(Error::ReceiveFrequency);
         }
         if !self.modes.contains(&state.mode) || !caps.modes.contains(&state.mode) {
@@ -112,15 +117,22 @@ impl Limits {
                 .and_then(|value| value.checked_add_signed(state.xit_hz))
                 .ok_or(Error::TransmitFrequency)?;
             if !contains(&self.transmit, transmit)
-                || !contains(&caps.transmit, transmit)
+                || !caps
+                    .transmit
+                    .iter()
+                    .any(|range| range.covers(transmit, state.mode))
                 || contains(&self.receive_only, transmit)
             {
                 return Err(Error::TransmitFrequency);
             }
             if self.maximum_power_mw.is_some_and(|maximum| {
                 !caps.power_mw || state.power_mw.is_none_or(|power| power > maximum)
-            }) || state.power_mw.is_some() && !caps.power_mw
-            {
+            }) || state.power_mw.is_some_and(|power| {
+                !caps.power_mw
+                    || !caps.transmit.iter().any(|range| {
+                        range.covers(transmit, state.mode) && range.permits_power(power)
+                    })
+            }) {
                 return Err(Error::Power);
             }
         }

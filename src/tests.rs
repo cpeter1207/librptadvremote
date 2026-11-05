@@ -32,10 +32,16 @@ fn configuration() -> RemoteBaseConfig {
 }
 
 fn capabilities() -> Capabilities {
+    let coverage = HardwareRange {
+        frequency: FrequencyRange::new(100_000, 500_000_000),
+        modes: vec![Mode::Fm, Mode::Usb],
+        minimum_power_mw: None,
+        maximum_power_mw: None,
+    };
     Capabilities {
         modes: vec![Mode::Fm, Mode::Usb],
-        receive: vec![FrequencyRange::new(100_000, 500_000_000)],
-        transmit: vec![FrequencyRange::new(100_000, 500_000_000)],
+        receive: vec![coverage.clone()],
+        transmit: vec![coverage],
         power_mw: true,
         encode_sources: vec![SignalSource::Dsp, SignalSource::External],
         decode_sources: vec![SignalSource::Dsp, SignalSource::External],
@@ -72,6 +78,40 @@ fn remote_decode_control_does_not_replace_external_qualification() {
     config.memories[0].state.decode.ctcss_tenths_hz = 1148;
     config.memories[0].state.encode.control_source = Some(SignalSource::Rig);
     assert_eq!(RemoteBase::new(config, caps).err(), Some(Error::Signaling));
+}
+
+#[test]
+fn remote_hardware_coverage_keeps_mode_and_power_on_each_range() {
+    let mut config = configuration();
+    config.limits.modes.push(Mode::Usb);
+    config.memories[0].state.mode = Mode::Usb;
+    let range = HardwareRange {
+        frequency: FrequencyRange::new(144_000_000, 148_000_000),
+        modes: vec![Mode::Fm],
+        minimum_power_mw: Some(1000),
+        maximum_power_mw: Some(3000),
+    };
+    let mut caps = capabilities();
+    caps.receive = vec![range.clone()];
+    caps.transmit = vec![range];
+    assert_eq!(
+        RemoteBase::new(config.clone(), caps.clone()).err(),
+        Some(Error::ReceiveFrequency)
+    );
+    caps.receive[0].modes.push(Mode::Usb);
+    assert_eq!(
+        RemoteBase::new(config.clone(), caps.clone()).err(),
+        Some(Error::TransmitFrequency)
+    );
+    caps.transmit[0].modes.push(Mode::Usb);
+    assert_eq!(
+        RemoteBase::new(config.clone(), caps.clone()).err(),
+        Some(Error::Power)
+    );
+    caps.transmit[0].maximum_power_mw = Some(6000);
+    assert!(RemoteBase::new(config.clone(), caps.clone()).is_ok());
+    config.memories[0].state.power_mw = Some(500);
+    assert_eq!(RemoteBase::new(config, caps).err(), Some(Error::Power));
 }
 
 #[test]

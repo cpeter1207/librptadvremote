@@ -28,6 +28,20 @@ typedef struct RptAdvRemoteRanges {
     const RptAdvRemoteRange *data; /**< Readable aligned array, or NULL if empty. */
     size_t length; /**< Number of intervals. */
 } RptAdvRemoteRanges;
+/** One hardware interval with its own mode and power capabilities. */
+typedef struct RptAdvRemoteCoverage {
+    uint64_t minimum; /**< Inclusive lower frequency, Hz. */
+    uint64_t maximum; /**< Inclusive upper frequency, Hz. */
+    uint64_t mode_mask; /**< Supported modes within this interval. */
+    uint32_t flags; /**< Bit zero minimum power, bit one maximum power present. */
+    uint32_t minimum_power_mw; /**< Hardware lower bound when flag one is present. */
+    uint32_t maximum_power_mw; /**< Hardware upper bound when flag two is present. */
+} RptAdvRemoteCoverage;
+/** Hardware coverage copied during setup; no mode/range relationships are flattened. */
+typedef struct RptAdvRemoteCoverages {
+    const RptAdvRemoteCoverage *data; /**< Borrowed aligned array. */
+    size_t length; /**< Number of hardware intervals. */
+} RptAdvRemoteCoverages;
 /** Independent encode/decode signaling; no external encoder programming implied. */
 typedef struct RptAdvRemoteSignal {
     uint32_t source; /**< 0 disabled, 1 DSP, 2 external, 3 rig. */
@@ -65,8 +79,8 @@ typedef struct RptAdvRemoteLimits {
 } RptAdvRemoteLimits;
 /** Selected backend capabilities, including available shared signal providers. */
 typedef struct RptAdvRemoteCapabilities {
-    RptAdvRemoteRanges receive; /**< Actual RX coverage. */
-    RptAdvRemoteRanges transmit; /**< Actual TX coverage. */
+    RptAdvRemoteCoverages receive; /**< Actual RX coverage, retaining per-range modes. */
+    RptAdvRemoteCoverages transmit; /**< Actual TX coverage, retaining modes and power. */
     uint64_t mode_mask; /**< Modes the backend can apply. */
     uint64_t readback_fields; /**< Actually readable operating-patch field bits. */
     uint64_t scan_mode_mask; /**< Modes with usable configured activity qualification. */

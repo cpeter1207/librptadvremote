@@ -43,6 +43,10 @@ int main(void)
 {
     const RptAdvRemoteApi *api = rptadv_remote_api_v1();
     const RptAdvRemoteRange range = {144000000, 148000000};
+    const RptAdvRemoteCoverage hardware = {
+        .minimum = 144000000, .maximum = 148000000,
+        .mode_mask = UINT64_C(1) << RPTADV_REMOTE_FM,
+    };
     const RptAdvRemoteMemory memory = {
         .selector = 1,
         .name = "local",
@@ -72,8 +76,8 @@ int main(void)
             .maximum_power_mw = 10000,
         },
         .capabilities = {
-            .receive = {&range, 1},
-            .transmit = {&range, 1},
+            .receive = {&hardware, 1},
+            .transmit = {&hardware, 1},
             .mode_mask = UINT64_C(1) << RPTADV_REMOTE_FM,
             .flags = RPTADV_REMOTE_POWER,
             .readback_fields = RPTADV_REMOTE_PATCH_ALL,
