@@ -44,6 +44,37 @@ fn capabilities() -> Capabilities {
 }
 
 #[test]
+fn remote_decode_control_does_not_replace_external_qualification() {
+    let mut config = configuration();
+    config.memories[0].state.decode = Signaling {
+        source: SignalSource::External,
+        control_source: Some(SignalSource::Rig),
+        enabled: true,
+        ctcss_tenths_hz: 1148,
+        ..Signaling::default()
+    };
+    let mut caps = capabilities();
+    assert_eq!(
+        RemoteBase::new(config.clone(), caps.clone()).err(),
+        Some(Error::Signaling)
+    );
+    caps.decode_control_sources.push(SignalSource::Rig);
+    let rig = RemoteBase::new(config.clone(), caps.clone()).unwrap();
+    assert_eq!(
+        rig.snapshot().requested.decode.source,
+        SignalSource::External
+    );
+    config.memories[0].state.decode.ctcss_tenths_hz = 0;
+    assert_eq!(
+        RemoteBase::new(config.clone(), caps.clone()).err(),
+        Some(Error::Signaling)
+    );
+    config.memories[0].state.decode.ctcss_tenths_hz = 1148;
+    config.memories[0].state.encode.control_source = Some(SignalSource::Rig);
+    assert_eq!(RemoteBase::new(config, caps).err(), Some(Error::Signaling));
+}
+
+#[test]
 fn remote_base_rejects_unsafe_complete_state() {
     let configuration = configuration();
     let capabilities = capabilities();
@@ -113,6 +144,7 @@ fn remote_signaling_validates_actual_dcs_bits_and_exclusive_tones() {
             ctcss_tenths_hz: tone,
             dcs_code: code,
             inverted,
+            ..Signaling::default()
         };
         assert_eq!(
             RemoteBase::new(config, capabilities()).err(),

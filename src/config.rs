@@ -53,6 +53,8 @@ pub enum SignalSource {
 pub struct Signaling {
     /// Selected provider; encode and decode use separate records.
     pub source: SignalSource,
+    /// Optional decoder programming override; qualification still uses `source`.
+    pub control_source: Option<SignalSource>,
     /// Whether the selected signal is currently enabled.
     pub enabled: bool,
     /// CTCSS in tenths of hertz, or zero when DCS/no tone is selected.
@@ -109,6 +111,8 @@ pub struct Capabilities {
     pub encode_sources: Vec<SignalSource>,
     /// Supported decode providers; does not imply encode support.
     pub decode_sources: Vec<SignalSource>,
+    /// Independently supported decoder programming providers.
+    pub decode_control_sources: Vec<SignalSource>,
     /// Readable state-field mask, in the same order as an operating patch.
     /// Zero means write-only; unavailable fields are never observations.
     pub readback_fields: u64,

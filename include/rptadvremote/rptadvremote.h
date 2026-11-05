@@ -31,6 +31,7 @@ typedef struct RptAdvRemoteRanges {
 /** Independent encode/decode signaling; no external encoder programming implied. */
 typedef struct RptAdvRemoteSignal {
     uint32_t source; /**< 0 disabled, 1 DSP, 2 external, 3 rig. */
+    uint32_t control_source; /**< Decoder programming: zero follows source, otherwise 1 DSP, 2 external, 3 rig. Encode must use zero. */
     uint32_t enabled; /**< Exactly zero or one. */
     uint32_t ctcss_tenths_hz; /**< Tone in tenths of hertz, otherwise zero. */
     uint32_t dcs_code; /**< Actual nine-bit DCS code, otherwise zero. */
@@ -72,6 +73,7 @@ typedef struct RptAdvRemoteCapabilities {
     uint32_t flags; /**< POWER only. */
     uint32_t encode_sources; /**< Bit mask, one shifted by source identifier. */
     uint32_t decode_sources; /**< Independent decode provider mask. */
+    uint32_t decode_control_sources; /**< Decoder-programming provider mask, separate from qualification. */
 } RptAdvRemoteCapabilities;
 /** Configuration-only named memory. */
 typedef struct RptAdvRemoteMemory {

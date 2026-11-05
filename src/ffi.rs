@@ -38,6 +38,7 @@ impl<T> Span<T> {
 #[derive(Clone, Copy)]
 struct Signal {
     source: u32,
+    control_source: u32,
     enabled: u32,
     ctcss_tenths_hz: u32,
     dcs_code: u32,
@@ -51,6 +52,11 @@ impl Signal {
         }
         Ok(Signaling {
             source: source(self.source)?,
+            control_source: if self.control_source == 0 {
+                None
+            } else {
+                Some(source(self.control_source)?)
+            },
             enabled: self.enabled != 0,
             ctcss_tenths_hz: self.ctcss_tenths_hz,
             dcs_code: self.dcs_code,
@@ -145,6 +151,7 @@ impl From<&OperatingState> for State {
     fn from(state: &OperatingState) -> Self {
         let signal = |value: Signaling| Signal {
             source: value.source as u32,
+            control_source: value.control_source.map_or(0, |source| source as u32),
             enabled: u32::from(value.enabled),
             ctcss_tenths_hz: value.ctcss_tenths_hz,
             dcs_code: value.dcs_code,
@@ -190,6 +197,7 @@ struct RawCapabilities {
     flags: u32,
     encode_sources: u32,
     decode_sources: u32,
+    decode_control_sources: u32,
 }
 #[repr(C)]
 struct RawMemory {
@@ -346,6 +354,7 @@ unsafe fn resolve(setup: &Setup) -> Result<RemoteBase, Error> {
                 scan_modes: modes(caps.scan_mode_mask)?,
                 encode_sources: sources(caps.encode_sources)?,
                 decode_sources: sources(caps.decode_sources)?,
+                decode_control_sources: sources(caps.decode_control_sources)?,
             },
         )
     };

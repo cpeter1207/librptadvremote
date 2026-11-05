@@ -124,8 +124,12 @@ impl Limits {
                 return Err(Error::Power);
             }
         }
-        validate_signal(state.encode, &caps.encode_sources)?;
-        validate_signal(state.decode, &caps.decode_sources)
+        validate_signal(state.encode, &caps.encode_sources, &[])?;
+        validate_signal(
+            state.decode,
+            &caps.decode_sources,
+            &caps.decode_control_sources,
+        )
     }
 }
 
@@ -133,14 +137,22 @@ fn contains(ranges: &[FrequencyRange], frequency: u64) -> bool {
     ranges.iter().any(|range| range.contains(frequency))
 }
 
-fn validate_signal(signal: Signaling, supported: &[SignalSource]) -> Result<(), Error> {
+fn validate_signal(
+    signal: Signaling,
+    supported: &[SignalSource],
+    controls: &[SignalSource],
+) -> Result<(), Error> {
+    let programming = signal.control_source.unwrap_or(signal.source);
     if signal.source != SignalSource::Disabled && !supported.contains(&signal.source)
+        || signal
+            .control_source
+            .is_some_and(|source| source == SignalSource::Disabled || !controls.contains(&source))
         || signal.dcs_code > 511
         || signal.ctcss_tenths_hz != 0 && (signal.dcs_code != 0 || signal.inverted)
-        || signal.source == SignalSource::Rig && signal.inverted
+        || programming == SignalSource::Rig && signal.inverted
         || signal.enabled
             && (signal.source == SignalSource::Disabled
-                || signal.source != SignalSource::External
+                || programming != SignalSource::External
                     && signal.ctcss_tenths_hz == 0
                     && signal.dcs_code == 0)
     {
