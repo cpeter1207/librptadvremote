@@ -325,6 +325,80 @@ fn tick(
 }
 
 #[test]
+fn remote_physical_ptt_follows_rendered_audio_not_raw_burst_edges() {
+    let (mut owner, mut backend) = scanning();
+    let mut activity = Activity {
+        transmit_requested: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 1, activity).unwrap();
+    assert_eq!(
+        backend.keys.last(),
+        Some(&false),
+        "no RF key before rendered demand"
+    );
+    activity.rendered_ptt = true;
+    tick(&mut owner, &mut backend, 2, activity).unwrap();
+    assert_eq!(backend.keys.last(), Some(&true));
+    activity.transmit_requested = false;
+    activity.physical_ptt = true;
+    tick(&mut owner, &mut backend, 3, activity).unwrap();
+    assert_eq!(
+        backend.keys.last(),
+        Some(&true),
+        "retain renderer-owned signaling tail"
+    );
+    activity.rendered_ptt = false;
+    tick(&mut owner, &mut backend, 4, activity).unwrap();
+    assert_eq!(backend.keys.last(), Some(&false));
+}
+
+#[test]
+fn remote_manual_tune_waits_for_rendering_and_retains_existing_turnoff() {
+    let (mut owner, mut backend) = scanning();
+    let id = owner
+        .request(RigRequest::Tune { duration_ms: 1000 }, 0)
+        .unwrap();
+    tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+    assert!(
+        !owner.snapshot().manual_tune_active,
+        "manual intent cannot key ahead of rendering"
+    );
+    assert_eq!(backend.keys.last(), Some(&false));
+    let mut rendering = Activity {
+        rendered_ptt: true,
+        transmit_requested: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 2, rendering).unwrap();
+    assert!(owner.snapshot().manual_tune_active);
+    assert_eq!(backend.keys.last(), Some(&true));
+    rendering.rendered_ptt = false;
+    tick(&mut owner, &mut backend, 10, rendering).unwrap();
+    assert!(!owner.snapshot().manual_tune_active);
+    rendering.rendered_ptt = true;
+    tick(&mut owner, &mut backend, 20, rendering).unwrap();
+    assert!(owner.snapshot().manual_tune_active);
+    tick(&mut owner, &mut backend, 1002, rendering).unwrap();
+    assert!(!owner.snapshot().manual_tune_active);
+    assert_eq!(
+        backend.keys.last(),
+        Some(&true),
+        "ordinary demand/signaling tails still own PTT"
+    );
+    assert_eq!(
+        owner.take_completion(),
+        Some(Completion { id, result: Ok(()) })
+    );
+    rendering.transmit_requested = false;
+    tick(&mut owner, &mut backend, 1003, rendering).unwrap();
+    assert_eq!(backend.keys.last(), Some(&true));
+    rendering.rendered_ptt = false;
+    tick(&mut owner, &mut backend, 1020, rendering).unwrap();
+    assert_eq!(backend.keys.last(), Some(&false));
+}
+
+#[test]
 fn remote_manual_tune_starts_after_unkey_and_expires_from_serviced_key() {
     let (mut owner, mut backend) = scanning();
     for duration in [0, 5001] {
@@ -352,12 +426,18 @@ fn remote_manual_tune_starts_after_unkey_and_expires_from_serviced_key() {
         ..Activity::default()
     };
     tick(&mut owner, &mut backend, 200, open_receive).unwrap();
+    assert!(!owner.snapshot().manual_tune_active);
+    let rendering = Activity {
+        rendered_ptt: true,
+        ..open_receive
+    };
+    tick(&mut owner, &mut backend, 201, rendering).unwrap();
     assert!(owner.snapshot().manual_tune_active);
     assert_eq!(backend.keys.last(), Some(&true));
     assert_eq!(owner.request(RigRequest::Recall(1), 200), Err(Error::Busy));
-    tick(&mut owner, &mut backend, 1199, open_receive).unwrap();
+    tick(&mut owner, &mut backend, 1200, rendering).unwrap();
     assert_eq!(backend.keys.last(), Some(&true));
-    tick(&mut owner, &mut backend, 1200, open_receive).unwrap();
+    tick(&mut owner, &mut backend, 1201, open_receive).unwrap();
     assert_eq!(backend.keys.last(), Some(&false));
     assert!(!owner.snapshot().manual_tune_active);
     assert_eq!(
@@ -374,6 +454,16 @@ fn remote_manual_tune_cancellation_and_failed_unkey_keep_the_original_completion
             .request(RigRequest::Tune { duration_ms: 1000 }, 0)
             .unwrap();
         tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+        tick(
+            &mut owner,
+            &mut backend,
+            2,
+            Activity {
+                rendered_ptt: true,
+                ..Activity::default()
+            },
+        )
+        .unwrap();
         let mut activity = Activity::default();
         match mode {
             0 => activity.command_cancelled = true,
@@ -383,7 +473,7 @@ fn remote_manual_tune_cancellation_and_failed_unkey_keep_the_original_completion
             2 => owner.retire(),
             _ => backend.key_failures.push_back(-42),
         }
-        let result = tick(&mut owner, &mut backend, 1001, activity);
+        let result = tick(&mut owner, &mut backend, 1002, activity);
         assert_eq!(backend.keys.last(), Some(&false));
         assert!(!owner.snapshot().manual_tune_active);
         let completion = owner.take_completion().unwrap();
@@ -399,7 +489,7 @@ fn remote_manual_tune_cancellation_and_failed_unkey_keep_the_original_completion
         if mode == 3 {
             assert_eq!(result, Err(Error::Backend));
             assert_eq!(owner.snapshot().failure.unwrap().code, -42);
-            tick(&mut owner, &mut backend, 1002, Activity::default()).unwrap();
+            tick(&mut owner, &mut backend, 1003, Activity::default()).unwrap();
             assert_eq!(owner.snapshot().ptt_applied, Some(false));
         }
     }
@@ -483,6 +573,7 @@ fn remote_scan_rejects_burst_overlapping_tune_until_unkey() {
     let transmit = Activity {
         linked_receiving: true,
         transmit_requested: true,
+        rendered_ptt: true,
         ..Activity::default()
     };
     tick(&mut owner, &mut backend, 2, transmit).unwrap();
@@ -574,6 +665,7 @@ fn remote_scan_receive_only_member_never_hops_to_admit_active_transmit() {
     let transmit = Activity {
         linked_receiving: true,
         transmit_requested: true,
+        rendered_ptt: true,
         ..Activity::default()
     };
     tick(&mut owner, &mut backend, 1000, transmit).unwrap();
@@ -673,6 +765,7 @@ fn remote_tune_waits_for_ptt_but_can_preempt_open_receive() {
             Activity {
                 physical_ptt: true,
                 transmit_requested: true,
+                rendered_ptt: true,
                 ..Activity::default()
             },
             &mut backend,
@@ -793,6 +886,7 @@ fn remote_key_failure_attempts_unkey_and_keeps_first_cause() {
             1,
             Activity {
                 transmit_requested: true,
+                rendered_ptt: true,
                 ..Activity::default()
             },
             &mut backend
@@ -828,6 +922,7 @@ fn remote_unkey_precedes_periodic_readback() {
             1,
             Activity {
                 transmit_requested: true,
+                rendered_ptt: true,
                 ..Activity::default()
             },
             &mut backend,
@@ -880,6 +975,7 @@ fn remote_critical_inhibit_bypasses_a_pending_tune() {
             Activity {
                 physical_ptt: true,
                 transmit_requested: true,
+                rendered_ptt: true,
                 ..Activity::default()
             },
             &mut backend,

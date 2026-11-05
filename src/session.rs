@@ -15,7 +15,8 @@ pub trait RigBackend {
     fn apply_step(&mut self, state: &OperatingState) -> Result<(), i32>;
     /// Apply PTT through its one explicitly selected provider.
     fn set_ptt(&mut self, keyed: bool) -> Result<(), i32>;
-    /// Start/stop the selected existing test-tone path; this core renders no PCM.
+    /// Start/stop existing manual key and test-tone intent. The renderer produces
+    /// PCM and final PTT demand; clearing this intent retains its normal tails.
     fn set_tune(&mut self, enabled: bool) -> Result<(), i32>;
     /// Current owner clock, in the same monotonic milliseconds as `advance`.
     /// It is read again after a potentially blocking physical call.
@@ -43,6 +44,8 @@ pub struct Activity {
     pub physical_ptt: bool,
     /// Current ordinary transmit demand, independent of receive qualification.
     pub transmit_requested: bool,
+    /// Final radio-renderer PTT demand, including its settle and signaling tails.
+    pub rendered_ptt: bool,
 }
 
 /// Typed partial change applied against the complete current desired state.
@@ -181,6 +184,7 @@ struct ManualTune {
     id: RequestId,
     duration_ms: u64,
     deadline_ms: Option<u64>,
+    intent_started: bool,
 }
 
 /// One radio's portable policy; its host serializes every call outside audio.
@@ -303,6 +307,7 @@ impl RemoteBase {
                     id,
                     duration_ms,
                     deadline_ms: None,
+                    intent_started: false,
                 });
                 self.snapshot.pending = true;
                 Ok(id)
@@ -542,7 +547,7 @@ impl RemoteBase {
                 }
             }
         }
-        if !activity.transmit_requested || self.snapshot.transmit_inhibited {
+        if !activity.rendered_ptt || self.snapshot.transmit_inhibited {
             self.set_key(false, backend)?;
         }
         if self.pending.as_ref().is_some_and(|pending| {
@@ -551,6 +556,7 @@ impl RemoteBase {
                     || activity.linked_receiving
                     || activity.transmit_requested)
         }) && !activity.physical_ptt
+            && !activity.rendered_ptt
             && !activity.command_source_active
         {
             let pending = self
@@ -596,7 +602,7 @@ impl RemoteBase {
             self.next_poll_ms = now_ms.saturating_add(self.poll_interval_ms());
             self.observe(backend, false)?;
         }
-        let keyed = activity.transmit_requested
+        let keyed = activity.rendered_ptt
             && !self.snapshot.transmit_inhibited
             && (self
                 .pending
@@ -624,12 +630,17 @@ impl RemoteBase {
         let cancelled =
             activity.command_cancelled || self.retired || self.snapshot.transmit_inhibited;
         if cancelled || tune.deadline_ms.is_some_and(|deadline| now >= deadline) {
-            let unkey = self.set_key(false, backend);
             let tone = backend.set_tune(false).map_err(|code| {
                 self.record_failure(code);
                 Error::Backend
             });
-            let result = unkey.and(tone);
+            // End only the manual intent. The renderer still owns ordinary
+            // demand and signaling tails; faults/retirement force immediate off.
+            let key = self.set_key(
+                activity.rendered_ptt && !self.retired && !self.snapshot.transmit_inhibited,
+                backend,
+            );
+            let result = tone.and(key);
             self.complete_manual_tune(result.and(if cancelled {
                 Err(Error::Stale)
             } else {
@@ -637,20 +648,18 @@ impl RemoteBase {
             }));
             return Some(result);
         }
-        if tune.deadline_ms.is_none() {
+        if !tune.intent_started {
             if activity.physical_ptt
+                || activity.rendered_ptt
                 || activity.command_source_active
                 || activity.transmit_requested
             {
                 return None;
             }
-            let result = backend
-                .set_tune(true)
-                .map_err(|code| {
-                    self.record_failure(code);
-                    Error::Backend
-                })
-                .and_then(|()| self.set_key(true, backend));
+            let result = backend.set_tune(true).map_err(|code| {
+                self.record_failure(code);
+                Error::Backend
+            });
             if let Err(error) = result {
                 let _ = backend
                     .set_tune(false)
@@ -661,11 +670,25 @@ impl RemoteBase {
             self.manual_tune
                 .as_mut()
                 .expect("tune is retained")
+                .intent_started = true;
+            return Some(Ok(()));
+        }
+        if let Err(error) = self.set_key(activity.rendered_ptt, backend) {
+            let _ = backend
+                .set_tune(false)
+                .map_err(|code| self.record_failure(code));
+            self.complete_manual_tune(Err(error));
+            return Some(Err(error));
+        }
+        self.snapshot.manual_tune_active = activity.rendered_ptt;
+        if tune.deadline_ms.is_none() && activity.rendered_ptt {
+            self.manual_tune
+                .as_mut()
+                .expect("tune is retained")
                 .deadline_ms = Some(
                 now.max(backend.monotonic_ms())
                     .saturating_add(tune.duration_ms),
             );
-            self.snapshot.manual_tune_active = true;
             self.snapshot.pending = false;
         }
         Some(Ok(()))

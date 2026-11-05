@@ -173,6 +173,8 @@ typedef struct RptAdvRemoteRequest {
 #define RPTADV_REMOTE_REQUEST_PTT 16u
 /** Originating source/session was revoked; ordinary unkey is not cancellation. */
 #define RPTADV_REMOTE_COMMAND_CANCELLED 32u
+/** Final renderer PTT demand, including existing settling/signaling tails. */
+#define RPTADV_REMOTE_RENDERED_PTT 64u
 /** One current-generation radio activity observation. */
 typedef struct RptAdvRemoteActivity {
     uint32_t struct_size; /**< Exact record size. */
@@ -188,7 +190,7 @@ typedef struct RptAdvRemoteBackend {
     int (*set_ptt)(void *, uint32_t); /**< Apply zero/one through the chosen provider. */
     uint64_t (*monotonic_ms)(void *); /**< Owner clock after blocking tune; required for scan lists. */
     uint64_t (*transmit_epoch)(void *); /**< Published rising-edge count; required for scan lists. */
-    int (*set_tune)(void *, uint32_t); /**< Existing test-tone path, zero/one; required by CAP_TUNE. */
+    int (*set_tune)(void *, uint32_t); /**< Existing manual key/tone intent; CAP_TUNE. Final PTT follows rendered demand. */
 } RptAdvRemoteBackend;
 /** Snapshot contains an applied state. */
 #define RPTADV_REMOTE_APPLIED 1u

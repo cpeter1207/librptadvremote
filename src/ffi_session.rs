@@ -257,7 +257,7 @@ pub(super) extern "C" fn advance(
         // SAFETY: the caller lends complete input records and the serialized live owner.
         let (activity, operations, owner) =
             unsafe { (sized(activity)?, sized(operations)?, owner(handle)?) };
-        if activity.flags & !63 != 0
+        if activity.flags & !127 != 0
             || operations.abi_version != 1
             || operations.apply_state.is_none()
             || operations.set_ptt.is_none()
@@ -281,6 +281,7 @@ pub(super) extern "C" fn advance(
                 command_cancelled: activity.flags & 32 != 0,
                 physical_ptt: activity.flags & 8 != 0,
                 transmit_requested: activity.flags & 16 != 0,
+                rendered_ptt: activity.flags & 64 != 0,
             },
             &mut backend,
         )?;
