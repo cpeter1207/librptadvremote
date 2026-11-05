@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+libdir=@LIBDIR@
+includedir=${prefix}/include
+abi_version=@ABI_VERSION@
+
+Name: librptadvremote
+Description: Portable remote-base operating control ABI for rpt_advanced
+Version: @VERSION@
+Libs: -L${libdir} -lrptadvremote
+Cflags: -I${includedir}

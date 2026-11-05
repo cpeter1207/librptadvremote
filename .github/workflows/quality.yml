@@ -1,16 +1,22 @@
-name: Prerequisite validation
+name: Required quality
+
 on:
+  push:
+  pull_request:
   workflow_dispatch:
     inputs:
       code_ref:
         description: Exact implementation commit to validate
         type: string
-        required: true
+        required: false
+        default: ''
+
 permissions:
   contents: read
+
 jobs:
   quality:
     uses: cpeter1207/rptadv-shared-library-workflows/.github/workflows/quality.yml@main
     with:
-      code_ref: ${{ inputs.code_ref }}
-      full: true
+      code_ref: ${{ inputs.code_ref || github.sha }}
+      full: ${{ github.event_name != 'push' }}
