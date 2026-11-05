@@ -186,6 +186,7 @@ struct RawCapabilities {
     transmit: Span<FrequencyRange>,
     mode_mask: u64,
     readback_fields: u64,
+    scan_mode_mask: u64,
     flags: u32,
     encode_sources: u32,
     decode_sources: u32,
@@ -342,6 +343,7 @@ unsafe fn resolve(setup: &Setup) -> Result<RemoteBase, Error> {
                 modes: modes(caps.mode_mask)?,
                 power_mw: caps.flags & POWER != 0,
                 readback_fields: caps.readback_fields,
+                scan_modes: modes(caps.scan_mode_mask)?,
                 encode_sources: sources(caps.encode_sources)?,
                 decode_sources: sources(caps.decode_sources)?,
             },
@@ -430,6 +432,7 @@ pub struct Api {
     snapshot: extern "C" fn(*const c_void, *mut crate::ffi_session::Snapshot) -> i32,
     take_completion: extern "C" fn(*mut c_void, *mut crate::ffi_session::RawCompletion) -> i32,
     retire: extern "C" fn(*mut c_void) -> i32,
+    scan_snapshot: extern "C" fn(*const c_void, *mut crate::ffi_session::RawScanSnapshot) -> i32,
 }
 
 // SAFETY: all descriptor fields and the pointed-to identity are immutable static data.
@@ -447,6 +450,7 @@ static API: Api = Api {
     snapshot: crate::ffi_session::snapshot,
     take_completion: crate::ffi_session::take_completion,
     retire: crate::ffi_session::retire,
+    scan_snapshot: crate::ffi_session::scan_snapshot,
 };
 
 /// Return the initial shared remote-base descriptor; its handle methods are control-only.

@@ -177,6 +177,10 @@ struct Backend {
     key_failures: std::collections::VecDeque<i32>,
     read_override: Option<OperatingState>,
     events: Vec<&'static str>,
+    clock_ms: u64,
+    apply_delay_ms: u64,
+    transmit_epoch: u64,
+    overlap_next_apply: bool,
 }
 
 impl RigBackend for Backend {
@@ -191,6 +195,11 @@ impl RigBackend for Backend {
             .ok_or(-100)
     }
     fn apply_step(&mut self, state: &OperatingState) -> Result<(), i32> {
+        self.clock_ms += self.apply_delay_ms;
+        if self.overlap_next_apply {
+            self.transmit_epoch += 1;
+            self.overlap_next_apply = false;
+        }
         self.writes.push(state.clone());
         self.state = Some(state.clone());
         match self.failures.pop_front() {
@@ -203,6 +212,247 @@ impl RigBackend for Backend {
         self.keys.push(keyed);
         self.key_failures.pop_front().map_or(Ok(()), Err)
     }
+
+    fn monotonic_ms(&self) -> u64 {
+        self.clock_ms
+    }
+    fn transmit_epoch(&self) -> u64 {
+        self.transmit_epoch
+    }
+}
+
+fn scanning() -> (RemoteBase, Backend) {
+    let mut config = configuration();
+    let mut other = config.memories[0].clone();
+    other.selector = 2;
+    other.name = "other".into();
+    other.state.receive_hz = 146_940_000;
+    other.state.transmit_hz = Some(146_940_000);
+    config.memories.push(other);
+    config.scan_lists[0].members = vec![2, 1];
+    let mut caps = capabilities();
+    caps.scan_modes = vec![Mode::Fm];
+    let mut owner = RemoteBase::new(config, caps).unwrap();
+    let mut backend = Backend::default();
+    owner.advance(0, Activity::default(), &mut backend).unwrap();
+    (owner, backend)
+}
+
+fn tick(
+    owner: &mut RemoteBase,
+    backend: &mut Backend,
+    now: u64,
+    activity: Activity,
+) -> Result<(), Error> {
+    backend.clock_ms = now;
+    owner.advance(now, activity, backend)
+}
+
+fn start_scan(owner: &mut RemoteBase, now: u64) {
+    owner
+        .request(
+            RigRequest::Scan(ScanRequest::Start {
+                selector: 1,
+                direction: ScanDirection::Up,
+                dwell_ms: None,
+            }),
+            now,
+        )
+        .unwrap();
+}
+
+#[test]
+fn remote_scan_uses_completed_tune_deadlines() {
+    let (mut owner, mut backend) = scanning();
+    backend.apply_delay_ms = 200;
+    start_scan(&mut owner, 100);
+    tick(&mut owner, &mut backend, 100, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(2));
+    assert_eq!(owner.scan_snapshot().unwrap().next_deadline_ms, Some(800));
+    tick(&mut owner, &mut backend, 799, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(2));
+    tick(&mut owner, &mut backend, 800, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(1));
+    let busy = Activity {
+        local_receiving: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 1500, busy).unwrap();
+    tick(&mut owner, &mut backend, 1600, Activity::default()).unwrap();
+    tick(&mut owner, &mut backend, 3599, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(1));
+    tick(&mut owner, &mut backend, 3600, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(2));
+}
+
+#[test]
+fn remote_scan_rejects_burst_overlapping_tune_until_unkey() {
+    let (mut owner, mut backend) = scanning();
+    backend.overlap_next_apply = true;
+    start_scan(&mut owner, 1);
+    tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+    let transmit = Activity {
+        linked_receiving: true,
+        transmit_requested: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 2, transmit).unwrap();
+    assert_eq!(backend.keys.last(), Some(&false));
+    assert_eq!(owner.snapshot().scan_rejected_bursts, 1);
+    tick(&mut owner, &mut backend, 3, Activity::default()).unwrap();
+    tick(&mut owner, &mut backend, 4, transmit).unwrap();
+    assert_eq!(backend.keys.last(), Some(&true));
+}
+
+#[test]
+fn remote_scan_stop_cancels_pending_start_and_preserves_applied_member() {
+    let (mut owner, mut backend) = scanning();
+    start_scan(&mut owner, 1);
+    let busy = Activity {
+        local_receiving: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 1, busy).unwrap();
+    let before = backend.writes.len();
+    owner
+        .request(RigRequest::Scan(ScanRequest::Stop), 2)
+        .unwrap();
+    tick(&mut owner, &mut backend, 3, Activity::default()).unwrap();
+    assert_eq!(backend.writes.len(), before);
+    assert_eq!(owner.snapshot().applied.unwrap().receive_hz, 146_520_000);
+    assert!(!owner.scan_snapshot().unwrap().active);
+    assert_eq!(owner.take_completion().unwrap().result, Err(Error::Stale));
+    assert!(owner.take_completion().unwrap().result.is_ok());
+}
+
+#[test]
+fn remote_scan_all_failing_members_stop_safely() {
+    let (mut owner, mut backend) = scanning();
+    backend.failures.extend([-55, 0, -66, 0]);
+    start_scan(&mut owner, 1);
+    assert_eq!(
+        tick(&mut owner, &mut backend, 1, Activity::default()),
+        Err(Error::Backend)
+    );
+    assert_eq!(
+        tick(&mut owner, &mut backend, 2, Activity::default()),
+        Err(Error::Backend)
+    );
+    assert!(!owner.scan_snapshot().unwrap().active);
+    assert!(owner.snapshot().transmit_inhibited);
+    assert_eq!(owner.scan_snapshot().unwrap().last_error, Some(-66));
+}
+
+#[test]
+fn remote_scan_priority_never_repeats_as_an_ordinary_member() {
+    let (owner, _) = scanning();
+    let mut config = owner.configuration().clone();
+    let mut third = config.memories[0].clone();
+    third.selector = 3;
+    third.name = "priority".into();
+    third.state.receive_hz = 147_000_000;
+    third.state.transmit_hz = Some(147_000_000);
+    config.memories.push(third);
+    config.scan_lists[0].members.push(3);
+    config.scan_lists[0].priority = Some(3);
+    let mut caps = capabilities();
+    caps.scan_modes = vec![Mode::Fm];
+    let mut owner = RemoteBase::new(config, caps).unwrap();
+    let mut backend = Backend::default();
+    tick(&mut owner, &mut backend, 0, Activity::default()).unwrap();
+    start_scan(&mut owner, 1);
+    for (now, expected) in [(1, 2), (501, 3), (1001, 1), (1501, 3), (2001, 2)] {
+        tick(&mut owner, &mut backend, now, Activity::default()).unwrap();
+        assert_eq!(
+            owner.scan_snapshot().unwrap().current_memory,
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn remote_scan_receive_only_member_never_hops_to_admit_active_transmit() {
+    let (owner, _) = scanning();
+    let mut config = owner.configuration().clone();
+    config.memories[1].state.transmit_hz = None;
+    let mut caps = capabilities();
+    caps.scan_modes = vec![Mode::Fm];
+    let mut owner = RemoteBase::new(config, caps).unwrap();
+    let mut backend = Backend::default();
+    tick(&mut owner, &mut backend, 0, Activity::default()).unwrap();
+    start_scan(&mut owner, 1);
+    tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+    let transmit = Activity {
+        linked_receiving: true,
+        transmit_requested: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 1000, transmit).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(2));
+    assert_eq!(backend.keys.last(), Some(&false));
+    tick(&mut owner, &mut backend, 1001, Activity::default()).unwrap();
+    tick(&mut owner, &mut backend, 3000, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(2));
+    tick(&mut owner, &mut backend, 3001, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(1));
+}
+
+#[test]
+fn remote_scan_pause_resume_skip_and_recall_keep_one_operating_state() {
+    let (mut owner, mut backend) = scanning();
+    start_scan(&mut owner, 1);
+    tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+    owner.take_completion().unwrap();
+    for request in [
+        ScanRequest::Pause,
+        ScanRequest::SetDwell(250),
+        ScanRequest::SetResumeDelay(0),
+        ScanRequest::Direction(ScanDirection::Down),
+    ] {
+        owner.request(RigRequest::Scan(request), 2).unwrap();
+        assert!(owner.take_completion().unwrap().result.is_ok());
+    }
+    let count = backend.writes.len();
+    tick(&mut owner, &mut backend, 1000, Activity::default()).unwrap();
+    assert_eq!(backend.writes.len(), count);
+    owner
+        .request(RigRequest::Scan(ScanRequest::Resume), 1001)
+        .unwrap();
+    owner.take_completion();
+    tick(&mut owner, &mut backend, 1001, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(1));
+    owner
+        .request(RigRequest::Scan(ScanRequest::Skip), 1002)
+        .unwrap();
+    owner.take_completion();
+    tick(&mut owner, &mut backend, 1002, Activity::default()).unwrap();
+    assert_eq!(owner.scan_snapshot().unwrap().current_memory, Some(2));
+    owner.request(RigRequest::Recall(1), 1003).unwrap();
+    tick(&mut owner, &mut backend, 1003, Activity::default()).unwrap();
+    assert!(!owner.scan_snapshot().unwrap().active);
+    assert_eq!(owner.snapshot().applied.unwrap().receive_hz, 146_520_000);
+    let count = backend.writes.len();
+    tick(&mut owner, &mut backend, 10_000, Activity::default()).unwrap();
+    assert_eq!(backend.writes.len(), count);
+}
+
+#[test]
+fn remote_scan_requires_usable_activity_qualification() {
+    let mut owner = RemoteBase::new(configuration(), capabilities()).unwrap();
+    let mut backend = Backend::default();
+    owner.advance(0, Activity::default(), &mut backend).unwrap();
+    assert_eq!(
+        owner.request(
+            RigRequest::Scan(ScanRequest::Start {
+                selector: 1,
+                direction: ScanDirection::Up,
+                dwell_ms: None
+            }),
+            1
+        ),
+        Err(Error::Unsupported)
+    );
+    assert!(owner.scan_snapshot().is_none());
 }
 
 fn running_radio() -> (RemoteBase, Backend) {

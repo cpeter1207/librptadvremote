@@ -7,10 +7,12 @@ mod config;
 mod ffi;
 mod ffi_session;
 mod limits;
+mod scan;
 mod session;
 
 pub use config::*;
 pub use limits::*;
+pub use scan::{ScanDirection, ScanRequest, ScanSnapshot};
 pub use session::*;
 
 #[cfg(test)]

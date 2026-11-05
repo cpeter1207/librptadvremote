@@ -1,6 +1,8 @@
 //! Serialized remote-base tune and transmit admission on the physical owner.
 
-use crate::{Capabilities, Error, OperatingState, RemoteBaseConfig};
+use crate::{
+    Capabilities, Error, OperatingState, RemoteBaseConfig, ScanRequest, ScanSnapshot, scan::Scanner,
+};
 
 /// Physical calls supplied by the selected dependency adapter and GPIO owner.
 pub trait RigBackend {
@@ -13,6 +15,15 @@ pub trait RigBackend {
     fn apply_step(&mut self, state: &OperatingState) -> Result<(), i32>;
     /// Apply PTT through its one explicitly selected provider.
     fn set_ptt(&mut self, keyed: bool) -> Result<(), i32>;
+    /// Current owner clock, in the same monotonic milliseconds as `advance`.
+    /// It is read again after a potentially blocking physical call.
+    fn monotonic_ms(&self) -> u64 {
+        0
+    }
+    /// Rising-edge count for transmit demand, published independently by audio.
+    fn transmit_epoch(&self) -> u64 {
+        0
+    }
 }
 
 /// Native radio activity copied from the current generation's published state.
@@ -98,6 +109,8 @@ pub enum RigRequest {
     Recall(u32),
     /// Change only administrative inhibit; a safety fault remains independent.
     Inhibit(bool),
+    /// Operate an immutable configured scan list.
+    Scan(ScanRequest),
 }
 
 /// Context-local monotonically allocated operation identity; zero is startup.
@@ -143,11 +156,14 @@ pub struct RigSnapshot {
     pub pending: bool,
     /// Last successfully serviced PTT command, not a physical RF observation.
     pub ptt_applied: Option<bool>,
+    /// Number of transmit bursts rejected because they began during scan tuning.
+    pub scan_rejected_bursts: u64,
 }
 
 struct Pending {
     id: RequestId,
     state: OperatingState,
+    scan_member: Option<u32>,
 }
 
 /// One radio's portable policy; its host serializes every call outside audio.
@@ -163,6 +179,9 @@ pub struct RemoteBase {
     safe: bool,
     retired: bool,
     next_poll_ms: u64,
+    scan: Option<Scanner>,
+    blocked_scan_burst: bool,
+    last_attempt_code: Option<i32>,
 }
 
 impl RemoteBase {
@@ -176,6 +195,7 @@ impl RemoteBase {
             pending: Some(Pending {
                 id: RequestId(0),
                 state: state.clone(),
+                scan_member: None,
             }),
             snapshot: RigSnapshot {
                 requested: state,
@@ -188,6 +208,7 @@ impl RemoteBase {
                 failure: None,
                 pending: true,
                 ptt_applied: None,
+                scan_rejected_bursts: 0,
             },
             completion: None,
             critical_completion: None,
@@ -196,6 +217,9 @@ impl RemoteBase {
             safe: false,
             retired: false,
             next_poll_ms: 0,
+            scan: None,
+            blocked_scan_burst: false,
+            last_attempt_code: None,
         })
     }
 
@@ -214,6 +238,11 @@ impl RemoteBase {
         self.snapshot.clone()
     }
 
+    /// Return scan selection/hold/error state without physical I/O.
+    pub fn scan_snapshot(&self) -> Option<ScanSnapshot> {
+        self.scan.as_ref().map(Scanner::snapshot)
+    }
+
     /// Drain a result; an urgent inhibit can complete while an older tune waits.
     pub fn take_completion(&mut self) -> Option<Completion> {
         self.completion
@@ -224,50 +253,185 @@ impl RemoteBase {
     /// Retire this owner; later service can only try to unkey it.
     pub fn retire(&mut self) {
         self.retired = true;
+        if let Some(scan) = self.scan.as_mut() {
+            scan.stop();
+        }
         self.pending = None;
         self.snapshot.pending = false;
         self.update_admission();
     }
 
     /// Admit a validated operation without physical I/O or waiting for its completion.
-    pub fn request(&mut self, request: RigRequest, _now_ms: u64) -> Result<RequestId, Error> {
+    pub fn request(&mut self, request: RigRequest, now_ms: u64) -> Result<RequestId, Error> {
         if self.retired {
             return Err(Error::Stale);
         }
-        if matches!(request, RigRequest::Inhibit(true)) {
-            if self.critical_completion.is_some() {
-                return Err(Error::Busy);
+        match request {
+            RigRequest::Scan(request) => self.request_scan(request, now_ms),
+            RigRequest::Inhibit(true) => {
+                if self.critical_completion.is_some() {
+                    return Err(Error::Busy);
+                }
+                let id = self.allocate_id()?;
+                self.administrative_inhibit = true;
+                self.update_admission();
+                self.critical_completion = Some(Completion { id, result: Ok(()) });
+                Ok(id)
             }
-            let id = self.allocate_id()?;
-            self.administrative_inhibit = true;
-            self.update_admission();
-            self.critical_completion = Some(Completion { id, result: Ok(()) });
-            return Ok(id);
+            RigRequest::Inhibit(false) => {
+                self.ordinary_slot(false)?;
+                let id = self.allocate_id()?;
+                self.administrative_inhibit = false;
+                self.update_admission();
+                self.completion = Some(Completion { id, result: Ok(()) });
+                Ok(id)
+            }
+            RigRequest::Set(patch) => self.queue_manual(
+                patch.apply(
+                    self.snapshot
+                        .applied
+                        .as_ref()
+                        .unwrap_or(&self.snapshot.requested)
+                        .clone(),
+                ),
+            ),
+            RigRequest::Recall(selector) => {
+                self.queue_manual(self.config.memory(selector)?.state.clone())
+            }
         }
-        if self.completion.is_some() || self.pending.is_some() || self.critical_completion.is_some()
+    }
+
+    fn ordinary_slot(&mut self, cancel_automatic: bool) -> Result<(), Error> {
+        if self.completion.is_some()
+            || self.critical_completion.is_some()
+            || self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| scan.start_request.is_some())
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| !cancel_automatic || pending.scan_member.is_none())
         {
             return Err(Error::Busy);
         }
-        let desired = match request {
-            RigRequest::Set(ref patch) => Some(patch.apply(self.snapshot.requested.clone())),
-            RigRequest::Recall(selector) => Some(self.config.memory(selector)?.state.clone()),
-            RigRequest::Inhibit(_) => None,
-        };
-        if let Some(state) = desired.as_ref() {
-            self.config
-                .limits
-                .validate_state(state, &self.capabilities)?;
+        if cancel_automatic {
+            self.pending = None;
+        }
+        Ok(())
+    }
+
+    fn queue_manual(&mut self, state: OperatingState) -> Result<RequestId, Error> {
+        self.config
+            .limits
+            .validate_state(&state, &self.capabilities)?;
+        self.ordinary_slot(true)?;
+        if let Some(scan) = self.scan.as_mut() {
+            scan.stop();
         }
         let id = self.allocate_id()?;
-        if let Some(state) = desired {
-            self.snapshot.requested = state.clone();
-            self.pending = Some(Pending { id, state });
-            self.snapshot.pending = true;
-        } else if let RigRequest::Inhibit(inhibit) = request {
-            self.administrative_inhibit = inhibit;
-            self.update_admission();
-            self.completion = Some(Completion { id, result: Ok(()) });
+        self.snapshot.requested = state.clone();
+        self.pending = Some(Pending {
+            id,
+            state,
+            scan_member: None,
+        });
+        self.snapshot.pending = true;
+        self.update_admission();
+        Ok(id)
+    }
+
+    fn request_scan(&mut self, request: ScanRequest, now: u64) -> Result<RequestId, Error> {
+        match request {
+            ScanRequest::Pause => self.interrupt_scan(true),
+            ScanRequest::Stop => self.interrupt_scan(false),
+            ScanRequest::Start {
+                selector,
+                direction,
+                dwell_ms,
+            } => {
+                self.ordinary_slot(false)?;
+                let list = self
+                    .config
+                    .scan_lists
+                    .iter()
+                    .find(|list| list.selector == selector)
+                    .ok_or(Error::NotFound)?;
+                if list.members.iter().any(|selector| {
+                    self.config.memory(*selector).is_ok_and(|memory| {
+                        !self.capabilities.scan_modes.contains(&memory.state.mode)
+                    })
+                }) {
+                    return Err(Error::Unsupported);
+                }
+                let list = list.clone();
+                let id = self.allocate_id()?;
+                let mut scan = Scanner::new(list, direction, dwell_ms, id)?;
+                scan.activity(now, false);
+                self.scan = Some(scan);
+                self.snapshot.pending = true;
+                self.update_admission();
+                Ok(id)
+            }
+            ScanRequest::Resume => self.change_scan(Scanner::resume),
+            ScanRequest::Direction(direction) => self.change_scan(|scan| {
+                scan.direction(direction);
+                Ok(())
+            }),
+            ScanRequest::Skip => self.change_scan(|scan| {
+                scan.skip();
+                Ok(())
+            }),
+            ScanRequest::SetDwell(duration) => self.change_scan(|scan| scan.dwell(duration)),
+            ScanRequest::SetResumeDelay(duration) => self.change_scan(|scan| {
+                scan.resume_delay(duration);
+                Ok(())
+            }),
+            ScanRequest::SetPriority(member) => self.change_scan(|scan| scan.priority(member)),
         }
+    }
+
+    fn change_scan(
+        &mut self,
+        action: impl FnOnce(&mut Scanner) -> Result<(), Error>,
+    ) -> Result<RequestId, Error> {
+        self.ordinary_slot(false)?;
+        action(self.scan.as_mut().ok_or(Error::NotFound)?)?;
+        let id = self.allocate_id()?;
+        self.completion = Some(Completion { id, result: Ok(()) });
+        self.update_admission();
+        Ok(id)
+    }
+
+    fn interrupt_scan(&mut self, pause: bool) -> Result<RequestId, Error> {
+        if self.critical_completion.is_some() {
+            return Err(Error::Busy);
+        }
+        if pause
+            && !self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| scan.snapshot().active)
+        {
+            return Err(Error::NotFound);
+        }
+        let id = self.allocate_id()?;
+        if let Some(scan) = self.scan.as_mut() {
+            let cancelled = if pause { scan.pause() } else { scan.stop() };
+            if let Some(completion) = cancelled {
+                self.completion = Some(completion);
+            }
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.scan_member.is_some())
+        {
+            self.pending = None;
+        }
+        self.snapshot.pending = self.pending.is_some();
+        self.critical_completion = Some(Completion { id, result: Ok(()) });
+        self.update_admission();
         Ok(id)
     }
 
@@ -289,23 +453,76 @@ impl RemoteBase {
             self.set_key(false, backend)?;
             return Err(Error::Stale);
         }
+        if !activity.transmit_requested && self.blocked_scan_burst {
+            self.blocked_scan_burst = false;
+            self.update_admission();
+        }
+        if let Some(scan) = self.scan.as_mut() {
+            scan.activity(
+                now_ms,
+                activity.local_receiving
+                    || activity.linked_receiving
+                    || activity.transmit_requested,
+            );
+            if self.pending.is_none() {
+                if let Some(member) = scan.due() {
+                    let state = self.config.memory(member)?.state.clone();
+                    self.snapshot.requested = state.clone();
+                    self.pending = Some(Pending {
+                        id: RequestId(0),
+                        state,
+                        scan_member: Some(member),
+                    });
+                    self.snapshot.pending = true;
+                }
+            }
+        }
         if !activity.transmit_requested || self.snapshot.transmit_inhibited {
             self.set_key(false, backend)?;
         }
-        if self.pending.is_some() && !activity.physical_ptt && !activity.command_source_active {
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending.scan_member.is_none()
+                || !(activity.local_receiving
+                    || activity.linked_receiving
+                    || activity.transmit_requested)
+        }) && !activity.physical_ptt
+            && !activity.command_source_active
+        {
             let pending = self
                 .pending
                 .take()
                 .expect("pending application was checked");
+            let epoch = backend.transmit_epoch();
             let result = self.apply(&pending.state, backend);
-            self.snapshot.pending = false;
-            if pending.id.0 != 0 {
+            let completed = now_ms.max(backend.monotonic_ms());
+            if let Some(member) = pending.scan_member {
+                let after = backend.transmit_epoch();
+                if after != epoch {
+                    self.blocked_scan_burst = true;
+                    self.snapshot.scan_rejected_bursts = self
+                        .snapshot
+                        .scan_rejected_bursts
+                        .saturating_add(after.wrapping_sub(epoch));
+                }
+                if let Some(scan) = self.scan.as_mut() {
+                    if let Some(completion) =
+                        scan.complete(member, completed, result, self.last_attempt_code)
+                    {
+                        self.completion = Some(completion);
+                    }
+                }
+            } else if pending.id.0 != 0 {
                 self.completion = Some(Completion {
                     id: pending.id,
                     result,
                 });
             }
-            self.next_poll_ms = now_ms.saturating_add(self.poll_interval_ms());
+            self.snapshot.pending = self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| scan.start_request.is_some());
+            self.update_admission();
+            self.next_poll_ms = completed.saturating_add(self.poll_interval_ms());
             // Physical I/O may have blocked. Read a fresh activity snapshot on the
             // next service iteration before admitting any new PTT.
             return result;
@@ -316,7 +533,11 @@ impl RemoteBase {
         }
         let keyed = activity.transmit_requested
             && !self.snapshot.transmit_inhibited
-            && (self.pending.is_none() || activity.physical_ptt);
+            && (self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.scan_member.is_some())
+                || activity.physical_ptt);
         self.set_key(keyed, backend)
     }
 
@@ -332,6 +553,11 @@ impl RemoteBase {
         self.snapshot.transmit_inhibited = self.retired
             || self.administrative_inhibit
             || !self.safe
+            || self.blocked_scan_burst
+            || self.scan.as_ref().is_some_and(|scan| {
+                let status = scan.snapshot();
+                status.active && status.current_memory.is_none()
+            })
             || self
                 .snapshot
                 .applied
@@ -358,6 +584,7 @@ impl RemoteBase {
 
     fn record_failure(&mut self, code: i32) {
         self.snapshot.failure.get_or_insert(Failure { code });
+        self.last_attempt_code.get_or_insert(code);
         self.safe = false;
         self.snapshot.receive_permitted = false;
         self.snapshot.verified = false;
@@ -369,7 +596,9 @@ impl RemoteBase {
         desired: &OperatingState,
         backend: &mut dyn RigBackend,
     ) -> Result<(), Error> {
+        self.last_attempt_code = None;
         self.safe = false;
+        self.snapshot.receive_permitted = false;
         self.update_admission();
         self.set_key(false, backend)?;
         let previous = self.snapshot.applied.clone();

@@ -28,6 +28,8 @@ pub enum Error {
     Stale = -10,
     /// Supported state readback disagrees with the requested tune.
     ReadbackMismatch = -11,
+    /// A declared operating function is unavailable in this composition.
+    Unsupported = -12,
 }
 
 impl std::fmt::Display for Error {

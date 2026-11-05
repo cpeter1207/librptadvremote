@@ -15,6 +15,8 @@ pub(super) struct Request {
     selector: u32,
     fields: u64,
     state: State,
+    value_ms: u64,
+    direction: u32,
 }
 
 #[repr(C)]
@@ -31,6 +33,8 @@ pub(super) struct Backend {
     read_state: Option<unsafe extern "C" fn(*mut c_void, *mut State) -> i32>,
     apply_state: Option<unsafe extern "C" fn(*mut c_void, *const State) -> i32>,
     set_ptt: Option<unsafe extern "C" fn(*mut c_void, u32) -> i32>,
+    monotonic_ms: Option<unsafe extern "C" fn(*mut c_void) -> u64>,
+    transmit_epoch: Option<unsafe extern "C" fn(*mut c_void) -> u64>,
 }
 
 #[repr(C)]
@@ -42,6 +46,7 @@ pub(super) struct Snapshot {
     observed: State,
     failure_code: i32,
     observed_fields: u64,
+    scan_rejected_bursts: u64,
 }
 
 #[repr(C)]
@@ -50,12 +55,38 @@ pub(super) struct RawCompletion {
     result: i32,
 }
 
+#[repr(C)]
+pub(super) struct RawScanSnapshot {
+    struct_size: u32,
+    flags: u32,
+    list: u32,
+    current_memory: u32,
+    direction: u32,
+    failed_memory: u32,
+    last_error: i32,
+    priority: u32,
+    next_deadline_ms: u64,
+    dwell_ms: u64,
+    resume_delay_ms: u64,
+    skipped: usize,
+}
+
 struct ForeignBackend<'a> {
     operations: &'a Backend,
     capabilities: Capabilities,
 }
 
 impl RigBackend for ForeignBackend<'_> {
+    fn monotonic_ms(&self) -> u64 {
+        self.operations
+            .monotonic_ms
+            .map_or(0, |read| unsafe { read(self.operations.context) })
+    }
+    fn transmit_epoch(&self) -> u64 {
+        self.operations
+            .transmit_epoch
+            .map_or(0, |read| unsafe { read(self.operations.context) })
+    }
     fn capabilities(&self) -> Capabilities {
         self.capabilities.clone()
     }
@@ -137,12 +168,70 @@ pub(super) extern "C" fn request(
             1 => RigRequest::Set(input.state.patch(input.fields)?),
             2 => RigRequest::Recall(input.selector),
             3 if input.selector <= 1 => RigRequest::Inhibit(input.selector != 0),
+            4 => RigRequest::Scan(ScanRequest::Start {
+                selector: input.selector,
+                direction: direction(input.direction)?,
+                dwell_ms: (input.value_ms != 0).then_some(input.value_ms),
+            }),
+            5 => RigRequest::Scan(ScanRequest::Pause),
+            6 => RigRequest::Scan(ScanRequest::Resume),
+            7 => RigRequest::Scan(ScanRequest::Stop),
+            8 => RigRequest::Scan(ScanRequest::Direction(direction(input.direction)?)),
+            9 => RigRequest::Scan(ScanRequest::Skip),
+            10 => RigRequest::Scan(ScanRequest::SetDwell(input.value_ms)),
+            11 => RigRequest::Scan(ScanRequest::SetResumeDelay(input.value_ms)),
+            12 => RigRequest::Scan(ScanRequest::SetPriority(
+                (input.selector != 0).then_some(input.selector),
+            )),
             _ => return Err(Error::InvalidConfiguration),
         };
         let id = owner.request(request, now_ms)?;
         // SAFETY: output remains writable for the same admitted call.
         unsafe {
             output.write(id.0);
+        }
+        Ok(0)
+    })
+}
+
+fn direction(value: u32) -> Result<ScanDirection, Error> {
+    match value {
+        0 => Ok(ScanDirection::Down),
+        1 => Ok(ScanDirection::Up),
+        _ => Err(Error::InvalidConfiguration),
+    }
+}
+
+pub(super) extern "C" fn scan_snapshot(handle: *const c_void, out: *mut RawScanSnapshot) -> i32 {
+    guard(|| {
+        // SAFETY: caller serializes the live owner and lends a sized writable output.
+        unsafe {
+            sized(out.cast_const())?;
+        }
+        let Some(scan) = unsafe { owner(handle.cast_mut())? }.scan_snapshot() else {
+            return Ok(1);
+        };
+        let flags = u32::from(scan.active)
+            | (u32::from(scan.paused) << 1)
+            | (u32::from(scan.activity_hold) << 2)
+            | (u32::from(scan.next_deadline_ms.is_some()) << 3)
+            | (u32::from(scan.last_error.is_some()) << 4);
+        // SAFETY: same admitted output record is exclusively writable through return.
+        unsafe {
+            out.write(RawScanSnapshot {
+                struct_size: size_of::<RawScanSnapshot>() as u32,
+                flags,
+                list: scan.list,
+                current_memory: scan.current_memory.unwrap_or(0),
+                direction: scan.direction as u32,
+                failed_memory: scan.failed_memory.unwrap_or(0),
+                last_error: scan.last_error.unwrap_or(0),
+                priority: scan.priority.unwrap_or(0),
+                next_deadline_ms: scan.next_deadline_ms.unwrap_or(0),
+                dwell_ms: scan.dwell_ms,
+                resume_delay_ms: scan.resume_delay_ms,
+                skipped: scan.skipped,
+            });
         }
         Ok(0)
     })
@@ -163,6 +252,8 @@ pub(super) extern "C" fn advance(
             || operations.apply_state.is_none()
             || operations.set_ptt.is_none()
             || owner.capabilities().readback_fields != 0 && operations.read_state.is_none()
+            || !owner.configuration().scan_lists.is_empty()
+                && (operations.monotonic_ms.is_none() || operations.transmit_epoch.is_none())
         {
             return Err(Error::InvalidConfiguration);
         }
@@ -218,6 +309,7 @@ pub(super) extern "C" fn snapshot(handle: *const c_void, output: *mut Snapshot) 
                 .unwrap_or_else(empty),
             failure_code: value.failure.map_or(0, |failure| failure.code),
             observed_fields: value.observed_fields,
+            scan_rejected_bursts: value.scan_rejected_bursts,
         };
         // SAFETY: the same admitted output span is exclusively writable through return.
         unsafe {

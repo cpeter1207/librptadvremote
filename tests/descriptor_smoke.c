@@ -33,6 +33,12 @@ static int set_ptt(void *context, uint32_t keyed)
     return 0;
 }
 
+static uint64_t owner_clock(void *context)
+{
+    (void)context;
+    return 0;
+}
+
 int main(void)
 {
     const RptAdvRemoteApi *api = rptadv_remote_api_v1();
@@ -48,6 +54,12 @@ int main(void)
             .mode = RPTADV_REMOTE_FM,
             .power_mw = 5000,
         },
+    };
+    const uint32_t scan_member = 1;
+    const RptAdvRemoteScan scan = {
+        .selector = 1, .name = "local", .name_length = 5,
+        .members = &scan_member, .member_count = 1,
+        .dwell_ms = 500, .resume_delay_ms = 2000,
     };
     RptAdvRemoteSetup setup = {
         .struct_size = sizeof(setup),
@@ -65,8 +77,10 @@ int main(void)
             .mode_mask = UINT64_C(1) << RPTADV_REMOTE_FM,
             .flags = RPTADV_REMOTE_POWER,
             .readback_fields = RPTADV_REMOTE_PATCH_ALL,
+            .scan_mode_mask = UINT64_C(1) << RPTADV_REMOTE_FM,
         },
         .memories = {&memory, 1},
+        .scan_lists = {&scan, 1},
         .startup_memory = 1,
     };
     void *handle = NULL;
@@ -100,6 +114,8 @@ int main(void)
         .read_state = read_state,
         .apply_state = apply_state,
         .set_ptt = set_ptt,
+        .monotonic_ms = owner_clock,
+        .transmit_epoch = owner_clock,
     };
     RptAdvRemoteActivity activity = {.struct_size = sizeof(activity)};
     RptAdvRemoteSnapshot snapshot = {.struct_size = sizeof(snapshot)};
@@ -124,8 +140,21 @@ int main(void)
     assert(api->take_completion(handle, &completion) == 0);
     assert(completion.request_id == request_id && completion.result == 0);
     assert(api->take_completion(handle, &completion) == 1);
+    RptAdvRemoteRequest start = {
+        .struct_size = sizeof(start), .abi_version = 1,
+        .kind = RPTADV_REMOTE_SCAN_START, .selector = 1, .direction = 1,
+    };
+    assert(api->request(handle, &start, 3, &request_id) == 0);
+    assert(api->advance(handle, 3, &activity, &backend) == 0);
+    assert(api->take_completion(handle, &completion) == 0 && completion.result == 0);
+    RptAdvRemoteScanSnapshot scan_status = {.struct_size = sizeof(scan_status)};
+    assert(api->scan_snapshot(handle, &scan_status) == 0);
+    assert(scan_status.current_memory == 1 && (scan_status.flags & 1) != 0);
+    start.kind = RPTADV_REMOTE_SCAN_STOP;
+    assert(api->request(handle, &start, 4, &request_id) == 0);
+    assert(api->take_completion(handle, &completion) == 0 && completion.result == 0);
     assert(api->retire(handle) == 0);
-    assert(api->advance(handle, 3, &activity, &backend) == -10);
+    assert(api->advance(handle, 5, &activity, &backend) == -10);
     api->destroy(handle);
     api->destroy(NULL);
     return 0;

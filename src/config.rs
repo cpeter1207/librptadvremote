@@ -112,6 +112,8 @@ pub struct Capabilities {
     /// Readable state-field mask, in the same order as an operating patch.
     /// Zero means write-only; unavailable fields are never observations.
     pub readback_fields: u64,
+    /// Modes with a usable configured receive-activity indication for scanning.
+    pub scan_modes: Vec<Mode>,
 }
 
 /// Named configuration-only memory with a stable numeric selector.
