@@ -319,7 +319,7 @@ fn sources(mask: u32) -> Result<Vec<SignalSource>, Error> {
 unsafe fn resolve(setup: &Setup) -> Result<RemoteBase, Error> {
     let limits = &setup.limits;
     let caps = &setup.capabilities;
-    if limits.flags & !POWER != 0 || caps.flags & !POWER != 0 {
+    if limits.flags & !POWER != 0 || caps.flags & !(POWER | 8) != 0 {
         return Err(Error::InvalidConfiguration);
     }
     // SAFETY: setup spans are borrowed for this call and copied below.
@@ -373,6 +373,7 @@ unsafe fn resolve(setup: &Setup) -> Result<RemoteBase, Error> {
                 poll_interval_ms: setup.poll_interval_ms,
             },
             Capabilities {
+                manual_tune: caps.flags & 8 != 0,
                 receive: coverage(&caps.receive)?,
                 transmit: coverage(&caps.transmit)?,
                 modes: modes(caps.mode_mask)?,

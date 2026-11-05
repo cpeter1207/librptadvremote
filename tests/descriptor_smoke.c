@@ -9,6 +9,7 @@ typedef struct BackendFixture {
     RptAdvRemoteState state;
     uint32_t keyed;
     uint32_t writes;
+    uint32_t tone;
 } BackendFixture;
 
 static int apply_state(void *context, const RptAdvRemoteState *state)
@@ -30,6 +31,11 @@ static int set_ptt(void *context, uint32_t keyed)
 {
     BackendFixture *backend = context;
     backend->keyed = keyed;
+    return 0;
+}
+static int set_tune(void *context, uint32_t enabled)
+{
+    ((BackendFixture *)context)->tone = enabled;
     return 0;
 }
 
@@ -79,7 +85,7 @@ int main(void)
             .receive = {&hardware, 1},
             .transmit = {&hardware, 1},
             .mode_mask = UINT64_C(1) << RPTADV_REMOTE_FM,
-            .flags = RPTADV_REMOTE_POWER,
+            .flags = RPTADV_REMOTE_POWER | RPTADV_REMOTE_CAP_TUNE,
             .readback_fields = RPTADV_REMOTE_PATCH_ALL,
             .scan_mode_mask = UINT64_C(1) << RPTADV_REMOTE_FM,
         },
@@ -120,6 +126,7 @@ int main(void)
         .set_ptt = set_ptt,
         .monotonic_ms = owner_clock,
         .transmit_epoch = owner_clock,
+        .set_tune = set_tune,
     };
     RptAdvRemoteActivity activity = {.struct_size = sizeof(activity)};
     RptAdvRemoteSnapshot snapshot = {.struct_size = sizeof(snapshot)};
@@ -157,6 +164,18 @@ int main(void)
     start.kind = RPTADV_REMOTE_SCAN_STOP;
     assert(api->request(handle, &start, 4, &request_id) == 0);
     assert(api->take_completion(handle, &completion) == 0 && completion.result == 0);
+    start.kind = RPTADV_REMOTE_TUNE;
+    start.value_ms = 1000;
+    assert(api->request(handle, &start, 5, &request_id) == 0);
+    assert(api->advance(handle, 5, &activity, &backend) == 0);
+    assert(fixture.tone == 1 && fixture.keyed == 1);
+    assert(api->snapshot(handle, &snapshot) == 0);
+    assert((snapshot.flags & RPTADV_REMOTE_TUNING) != 0);
+    activity.flags = RPTADV_REMOTE_COMMAND_CANCELLED;
+    assert(api->advance(handle, 6, &activity, &backend) == 0);
+    assert(fixture.tone == 0 && fixture.keyed == 0);
+    assert(api->take_completion(handle, &completion) == 0 && completion.request_id == request_id && completion.result == -10);
+    activity.flags = 0;
     assert(api->retire(handle) == 0);
     assert(api->advance(handle, 5, &activity, &backend) == -10);
     api->destroy(handle);

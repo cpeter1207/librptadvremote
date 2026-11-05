@@ -15,6 +15,8 @@ pub trait RigBackend {
     fn apply_step(&mut self, state: &OperatingState) -> Result<(), i32>;
     /// Apply PTT through its one explicitly selected provider.
     fn set_ptt(&mut self, keyed: bool) -> Result<(), i32>;
+    /// Start/stop the selected existing test-tone path; this core renders no PCM.
+    fn set_tune(&mut self, enabled: bool) -> Result<(), i32>;
     /// Current owner clock, in the same monotonic milliseconds as `advance`.
     /// It is read again after a potentially blocking physical call.
     fn monotonic_ms(&self) -> u64 {
@@ -35,6 +37,8 @@ pub struct Activity {
     pub linked_receiving: bool,
     /// The originating DTMF source is still keyed.
     pub command_source_active: bool,
+    /// Originating source/session was revoked; ordinary unkey is not revocation.
+    pub command_cancelled: bool,
     /// Observed physical PTT, distinct from an intent or queued operation.
     pub physical_ptt: bool,
     /// Current ordinary transmit demand, independent of receive qualification.
@@ -103,6 +107,11 @@ impl OperatingPatch {
 /// Portable operating request; definitions remain configuration-only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RigRequest {
+    /// Key a bounded manual test using the existing backend tone path.
+    Tune {
+        /// Milliseconds after serviced keying, inclusive range one through 5000.
+        duration_ms: u64,
+    },
     /// Validate and apply a partial live change.
     Set(OperatingPatch),
     /// Recall a configured complete memory.
@@ -136,6 +145,8 @@ pub struct Failure {
 /// Copied status with configuration, application, and observation distinguished.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RigSnapshot {
+    /// The bounded manual test is currently keyed, not merely waiting for unkey.
+    pub manual_tune_active: bool,
     /// Complete desired state.
     pub requested: OperatingState,
     /// Most recent successfully applied state, if any.
@@ -165,6 +176,12 @@ struct Pending {
     state: OperatingState,
     scan_member: Option<u32>,
 }
+#[derive(Clone, Copy)]
+struct ManualTune {
+    id: RequestId,
+    duration_ms: u64,
+    deadline_ms: Option<u64>,
+}
 
 /// One radio's portable policy; its host serializes every call outside audio.
 pub struct RemoteBase {
@@ -182,6 +199,7 @@ pub struct RemoteBase {
     scan: Option<Scanner>,
     blocked_scan_burst: bool,
     last_attempt_code: Option<i32>,
+    manual_tune: Option<ManualTune>,
 }
 
 impl RemoteBase {
@@ -198,6 +216,7 @@ impl RemoteBase {
                 scan_member: None,
             }),
             snapshot: RigSnapshot {
+                manual_tune_active: false,
                 requested: state,
                 applied: None,
                 observed: None,
@@ -220,6 +239,7 @@ impl RemoteBase {
             scan: None,
             blocked_scan_burst: false,
             last_attempt_code: None,
+            manual_tune: None,
         })
     }
 
@@ -267,6 +287,26 @@ impl RemoteBase {
             return Err(Error::Stale);
         }
         match request {
+            RigRequest::Tune { duration_ms } => {
+                if !(1..=5000).contains(&duration_ms) {
+                    return Err(Error::InvalidConfiguration);
+                }
+                self.ordinary_slot(true)?;
+                if !self.capabilities.manual_tune || self.snapshot.transmit_inhibited {
+                    return Err(Error::Unsupported);
+                }
+                if let Some(scan) = &mut self.scan {
+                    scan.stop();
+                }
+                let id = self.allocate_id()?;
+                self.manual_tune = Some(ManualTune {
+                    id,
+                    duration_ms,
+                    deadline_ms: None,
+                });
+                self.snapshot.pending = true;
+                Ok(id)
+            }
             RigRequest::Scan(request) => self.request_scan(request, now_ms),
             RigRequest::Inhibit(true) => {
                 if self.critical_completion.is_some() {
@@ -302,7 +342,8 @@ impl RemoteBase {
     }
 
     fn ordinary_slot(&mut self, cancel_automatic: bool) -> Result<(), Error> {
-        if self.completion.is_some()
+        if self.manual_tune.is_some()
+            || self.completion.is_some()
             || self.critical_completion.is_some()
             || self
                 .scan
@@ -449,9 +490,33 @@ impl RemoteBase {
         activity: Activity,
         backend: &mut dyn RigBackend,
     ) -> Result<(), Error> {
+        if let Some(result) = self.advance_manual_tune(now_ms, activity, backend) {
+            return result.and(if self.retired {
+                Err(Error::Stale)
+            } else {
+                Ok(())
+            });
+        }
         if self.retired {
             self.set_key(false, backend)?;
             return Err(Error::Stale);
+        }
+        if activity.command_cancelled
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.id.0 != 0 && pending.scan_member.is_none())
+        {
+            let pending = self.pending.take().expect("manual pending was checked");
+            self.completion = Some(Completion {
+                id: pending.id,
+                result: Err(Error::Stale),
+            });
+            self.snapshot.pending = false;
+            if let Some(applied) = &self.snapshot.applied {
+                self.snapshot.requested = applied.clone();
+            }
+            self.update_admission();
         }
         if !activity.transmit_requested && self.blocked_scan_burst {
             self.blocked_scan_burst = false;
@@ -547,6 +612,76 @@ impl RemoteBase {
         } else {
             self.config.poll_interval_ms
         }
+    }
+
+    fn advance_manual_tune(
+        &mut self,
+        now: u64,
+        activity: Activity,
+        backend: &mut dyn RigBackend,
+    ) -> Option<Result<(), Error>> {
+        let tune = self.manual_tune?;
+        let cancelled =
+            activity.command_cancelled || self.retired || self.snapshot.transmit_inhibited;
+        if cancelled || tune.deadline_ms.is_some_and(|deadline| now >= deadline) {
+            let unkey = self.set_key(false, backend);
+            let tone = backend.set_tune(false).map_err(|code| {
+                self.record_failure(code);
+                Error::Backend
+            });
+            let result = unkey.and(tone);
+            self.complete_manual_tune(result.and(if cancelled {
+                Err(Error::Stale)
+            } else {
+                Ok(())
+            }));
+            return Some(result);
+        }
+        if tune.deadline_ms.is_none() {
+            if activity.physical_ptt
+                || activity.command_source_active
+                || activity.transmit_requested
+            {
+                return None;
+            }
+            let result = backend
+                .set_tune(true)
+                .map_err(|code| {
+                    self.record_failure(code);
+                    Error::Backend
+                })
+                .and_then(|()| self.set_key(true, backend));
+            if let Err(error) = result {
+                let _ = backend
+                    .set_tune(false)
+                    .map_err(|code| self.record_failure(code));
+                self.complete_manual_tune(Err(error));
+                return Some(Err(error));
+            }
+            self.manual_tune
+                .as_mut()
+                .expect("tune is retained")
+                .deadline_ms = Some(
+                now.max(backend.monotonic_ms())
+                    .saturating_add(tune.duration_ms),
+            );
+            self.snapshot.manual_tune_active = true;
+            self.snapshot.pending = false;
+        }
+        Some(Ok(()))
+    }
+
+    fn complete_manual_tune(&mut self, result: Result<(), Error>) {
+        let tune = self
+            .manual_tune
+            .take()
+            .expect("manual tune is retained until unkey");
+        self.snapshot.manual_tune_active = false;
+        self.snapshot.pending = false;
+        self.completion = Some(Completion {
+            id: tune.id,
+            result,
+        });
     }
 
     fn update_admission(&mut self) {

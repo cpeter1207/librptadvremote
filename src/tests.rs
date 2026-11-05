@@ -39,6 +39,7 @@ fn capabilities() -> Capabilities {
         maximum_power_mw: None,
     };
     Capabilities {
+        manual_tune: true,
         modes: vec![Mode::Fm, Mode::Usb],
         receive: vec![coverage.clone()],
         transmit: vec![coverage],
@@ -284,6 +285,9 @@ impl RigBackend for Backend {
         self.keys.push(keyed);
         self.key_failures.pop_front().map_or(Ok(()), Err)
     }
+    fn set_tune(&mut self, _: bool) -> Result<(), i32> {
+        Ok(())
+    }
 
     fn monotonic_ms(&self) -> u64 {
         self.clock_ms
@@ -318,6 +322,119 @@ fn tick(
 ) -> Result<(), Error> {
     backend.clock_ms = now;
     owner.advance(now, activity, backend)
+}
+
+#[test]
+fn remote_manual_tune_starts_after_unkey_and_expires_from_serviced_key() {
+    let (mut owner, mut backend) = scanning();
+    for duration in [0, 5001] {
+        assert_eq!(
+            owner.request(
+                RigRequest::Tune {
+                    duration_ms: duration
+                },
+                0
+            ),
+            Err(Error::InvalidConfiguration)
+        );
+    }
+    let id = owner
+        .request(RigRequest::Tune { duration_ms: 1000 }, 1)
+        .unwrap();
+    let busy = Activity {
+        command_source_active: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 100, busy).unwrap();
+    assert!(!owner.snapshot().manual_tune_active);
+    let open_receive = Activity {
+        local_receiving: true,
+        ..Activity::default()
+    };
+    tick(&mut owner, &mut backend, 200, open_receive).unwrap();
+    assert!(owner.snapshot().manual_tune_active);
+    assert_eq!(backend.keys.last(), Some(&true));
+    assert_eq!(owner.request(RigRequest::Recall(1), 200), Err(Error::Busy));
+    tick(&mut owner, &mut backend, 1199, open_receive).unwrap();
+    assert_eq!(backend.keys.last(), Some(&true));
+    tick(&mut owner, &mut backend, 1200, open_receive).unwrap();
+    assert_eq!(backend.keys.last(), Some(&false));
+    assert!(!owner.snapshot().manual_tune_active);
+    assert_eq!(
+        owner.take_completion(),
+        Some(Completion { id, result: Ok(()) })
+    );
+}
+
+#[test]
+fn remote_manual_tune_cancellation_and_failed_unkey_keep_the_original_completion() {
+    for mode in 0..4 {
+        let (mut owner, mut backend) = scanning();
+        let id = owner
+            .request(RigRequest::Tune { duration_ms: 1000 }, 0)
+            .unwrap();
+        tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+        let mut activity = Activity::default();
+        match mode {
+            0 => activity.command_cancelled = true,
+            1 => {
+                owner.request(RigRequest::Inhibit(true), 2).unwrap();
+            }
+            2 => owner.retire(),
+            _ => backend.key_failures.push_back(-42),
+        }
+        let result = tick(&mut owner, &mut backend, 1001, activity);
+        assert_eq!(backend.keys.last(), Some(&false));
+        assert!(!owner.snapshot().manual_tune_active);
+        let completion = owner.take_completion().unwrap();
+        assert_eq!(completion.id, id);
+        assert_eq!(
+            completion.result,
+            Err(if mode == 3 {
+                Error::Backend
+            } else {
+                Error::Stale
+            })
+        );
+        if mode == 3 {
+            assert_eq!(result, Err(Error::Backend));
+            assert_eq!(owner.snapshot().failure.unwrap().code, -42);
+            tick(&mut owner, &mut backend, 1002, Activity::default()).unwrap();
+            assert_eq!(owner.snapshot().ptt_applied, Some(false));
+        }
+    }
+}
+
+#[test]
+fn remote_rejected_manual_tune_does_not_cancel_a_waiting_scan_member() {
+    let (base, _) = scanning();
+    let mut caps = base.capabilities().clone();
+    caps.manual_tune = false;
+    let mut owner = RemoteBase::new(base.configuration().clone(), caps).unwrap();
+    let mut backend = Backend::default();
+    tick(&mut owner, &mut backend, 0, Activity::default()).unwrap();
+    start_scan(&mut owner, 1);
+    tick(&mut owner, &mut backend, 1, Activity::default()).unwrap();
+    owner.take_completion().unwrap();
+    let due = owner.scan_snapshot().unwrap().next_deadline_ms.unwrap();
+    tick(
+        &mut owner,
+        &mut backend,
+        due,
+        Activity {
+            physical_ptt: true,
+            ..Activity::default()
+        },
+    )
+    .unwrap();
+    assert!(owner.snapshot().pending);
+    let writes = backend.writes.len();
+    assert_eq!(
+        owner.request(RigRequest::Tune { duration_ms: 1000 }, due),
+        Err(Error::Unsupported)
+    );
+    tick(&mut owner, &mut backend, due + 1, Activity::default()).unwrap();
+    assert_eq!(backend.writes.len(), writes + 1);
 }
 
 fn start_scan(owner: &mut RemoteBase, now: u64) {

@@ -15,6 +15,8 @@ extern "C" {
 #define RPTADV_REMOTE_POWER 2u
 /** State flag: the channel field is present. */
 #define RPTADV_REMOTE_CHANNEL 4u
+/** Capability flag: the selected owner has a stoppable calibrated test-tone path. */
+#define RPTADV_REMOTE_CAP_TUNE 8u
 /** Canonical FM mode identifier; masks use one shifted by the identifier. */
 #define RPTADV_REMOTE_FM 1u
 
@@ -84,7 +86,7 @@ typedef struct RptAdvRemoteCapabilities {
     uint64_t mode_mask; /**< Modes the backend can apply. */
     uint64_t readback_fields; /**< Actually readable operating-patch field bits. */
     uint64_t scan_mode_mask; /**< Modes with usable configured activity qualification. */
-    uint32_t flags; /**< POWER only. */
+    uint32_t flags; /**< POWER and CAP_TUNE only. */
     uint32_t encode_sources; /**< Bit mask, one shifted by source identifier. */
     uint32_t decode_sources; /**< Independent decode provider mask. */
     uint32_t decode_control_sources; /**< Decoder-programming provider mask, separate from qualification. */
@@ -142,7 +144,8 @@ enum RptAdvRemoteRequestKind {
     RPTADV_REMOTE_SCAN_SKIP = 9, /**< Skip the current member for this scan run. */
     RPTADV_REMOTE_SCAN_DWELL = 10, /**< Positive value_ms. */
     RPTADV_REMOTE_SCAN_RESUME_DELAY = 11, /**< Nonnegative value_ms. */
-    RPTADV_REMOTE_SCAN_PRIORITY = 12 /**< Member selector, zero disables. */
+    RPTADV_REMOTE_SCAN_PRIORITY = 12, /**< Member selector, zero disables. */
+    RPTADV_REMOTE_TUNE = 13 /**< Bounded existing test-tone operation, value_ms1..5000. */
 };
 /** Ordered patch bits: RX, TX, mode, width, RX/TX VFO, offset, RIT, XIT,
  * power, encode, decode, channel. Unknown bits are rejected. */
@@ -168,6 +171,8 @@ typedef struct RptAdvRemoteRequest {
 #define RPTADV_REMOTE_PHYSICAL_PTT 8u
 /** Ordinary controller transmit intent. */
 #define RPTADV_REMOTE_REQUEST_PTT 16u
+/** Originating source/session was revoked; ordinary unkey is not cancellation. */
+#define RPTADV_REMOTE_COMMAND_CANCELLED 32u
 /** One current-generation radio activity observation. */
 typedef struct RptAdvRemoteActivity {
     uint32_t struct_size; /**< Exact record size. */
@@ -183,6 +188,7 @@ typedef struct RptAdvRemoteBackend {
     int (*set_ptt)(void *, uint32_t); /**< Apply zero/one through the chosen provider. */
     uint64_t (*monotonic_ms)(void *); /**< Owner clock after blocking tune; required for scan lists. */
     uint64_t (*transmit_epoch)(void *); /**< Published rising-edge count; required for scan lists. */
+    int (*set_tune)(void *, uint32_t); /**< Existing test-tone path, zero/one; required by CAP_TUNE. */
 } RptAdvRemoteBackend;
 /** Snapshot contains an applied state. */
 #define RPTADV_REMOTE_APPLIED 1u
@@ -202,6 +208,8 @@ typedef struct RptAdvRemoteBackend {
 #define RPTADV_REMOTE_PTT_APPLIED 128u
 /** The last serviced PTT command requested keying; not physical RF confirmation. */
 #define RPTADV_REMOTE_PTT_HIGH 256u
+/** Bounded manual test tone is active, not merely waiting for command unkey. */
+#define RPTADV_REMOTE_TUNING 512u
 /** Copied operating status; no caller storage is retained. */
 typedef struct RptAdvRemoteSnapshot {
     uint32_t struct_size; /**< Exact writable record size. */

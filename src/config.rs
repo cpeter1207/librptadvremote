@@ -122,6 +122,8 @@ impl HardwareRange {
 /// Physical capabilities of the selected rig and its shared signaling providers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
+    /// Selected owner can start/stop its existing calibrated test-tone path.
+    pub manual_tune: bool,
     /// Modes the backend can actually apply.
     pub modes: Vec<Mode>,
     /// Hardware receive coverage.

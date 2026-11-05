@@ -35,6 +35,7 @@ pub(super) struct Backend {
     set_ptt: Option<unsafe extern "C" fn(*mut c_void, u32) -> i32>,
     monotonic_ms: Option<unsafe extern "C" fn(*mut c_void) -> u64>,
     transmit_epoch: Option<unsafe extern "C" fn(*mut c_void) -> u64>,
+    set_tune: Option<unsafe extern "C" fn(*mut c_void, u32) -> i32>,
 }
 
 #[repr(C)]
@@ -77,6 +78,12 @@ struct ForeignBackend<'a> {
 }
 
 impl RigBackend for ForeignBackend<'_> {
+    fn set_tune(&mut self, enabled: bool) -> Result<(), i32> {
+        let call = self.operations.set_tune.ok_or(Error::Unsupported as i32)?;
+        // SAFETY: the selected physical owner retains callback/context through advance.
+        let code = unsafe { call(self.operations.context, u32::from(enabled)) };
+        if code == 0 { Ok(()) } else { Err(code) }
+    }
     fn monotonic_ms(&self) -> u64 {
         self.operations
             .monotonic_ms
@@ -183,6 +190,9 @@ pub(super) extern "C" fn request(
             12 => RigRequest::Scan(ScanRequest::SetPriority(
                 (input.selector != 0).then_some(input.selector),
             )),
+            13 => RigRequest::Tune {
+                duration_ms: input.value_ms,
+            },
             _ => return Err(Error::InvalidConfiguration),
         };
         let id = owner.request(request, now_ms)?;
@@ -247,11 +257,12 @@ pub(super) extern "C" fn advance(
         // SAFETY: the caller lends complete input records and the serialized live owner.
         let (activity, operations, owner) =
             unsafe { (sized(activity)?, sized(operations)?, owner(handle)?) };
-        if activity.flags & !31 != 0
+        if activity.flags & !63 != 0
             || operations.abi_version != 1
             || operations.apply_state.is_none()
             || operations.set_ptt.is_none()
             || owner.capabilities().readback_fields != 0 && operations.read_state.is_none()
+            || owner.capabilities().manual_tune && operations.set_tune.is_none()
             || !owner.configuration().scan_lists.is_empty()
                 && (operations.monotonic_ms.is_none() || operations.transmit_epoch.is_none())
         {
@@ -267,6 +278,7 @@ pub(super) extern "C" fn advance(
                 local_receiving: activity.flags & 1 != 0,
                 linked_receiving: activity.flags & 2 != 0,
                 command_source_active: activity.flags & 4 != 0,
+                command_cancelled: activity.flags & 32 != 0,
                 physical_ptt: activity.flags & 8 != 0,
                 transmit_requested: activity.flags & 16 != 0,
             },
@@ -295,7 +307,8 @@ pub(super) extern "C" fn snapshot(handle: *const c_void, output: *mut Snapshot) 
                 | flag(value.pending, 32)
                 | flag(value.failure.is_some(), 64)
                 | flag(value.ptt_applied.is_some(), 128)
-                | flag(value.ptt_applied == Some(true), 256),
+                | flag(value.ptt_applied == Some(true), 256)
+                | flag(value.manual_tune_active, 512),
             requested: State::from(&value.requested),
             applied: value
                 .applied
